@@ -82,4 +82,16 @@ drivers/media/enhancement/amdolby_vision/amdv.c:bool el_missing = false;:1
 drivers/media/enhancement/amdolby_vision/amdv.c:el_missing = req.dv_enhance_exist && toggle_mode == 1 && !el_flag;:1
 drivers/media/enhancement/amdolby_vision/amdv.c:el_halfsize_flag = dv_inst[dv_id].el_halfsize_flag;:1
 drivers/media/enhancement/amdolby_vision/amdv.c:if (el_missing) {:1
+# Aggregate count, kept deliberately: 4 of these are pre-existing upstream
+# sites (amdv.c ~8452, ~8748, ~10078, ~11089) and only one is ours. It earns its
+# place as the hunk TAIL guard - a truncation after `el_flag = 0;` drops it to 4
+# - but upstream churn will move it, so read the sites before editing the number.
 drivers/media/enhancement/amdolby_vision/amdv.c:el_halfsize_flag = 0;:5
+
+
+# 0013: realign the EL queue to the BL before toggling (port of
+# recycle_dvel_vf_put from video_receiver.c, which this chain never reaches)
+drivers/media/video_sink/video.c:static void dvel_realign_to_bl(struct vframe_s *vf):1
+drivers/media/video_sink/video.c:static inline int recycle_dvel_vf_put(void):1
+drivers/media/video_sink/video.c:dvel_realign_to_bl(vf);:1
+drivers/media/video_sink/video.c:dropping %d surplus el frame(s):1

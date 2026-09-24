@@ -15,4 +15,7 @@ post_unpack() {
 
   # libbluray needs arm
   mv ${PKG_BUILD}/jre/lib/aarch64 ${PKG_BUILD}/jre/lib/arm
+
+  # ...but the launcher on an arm64 BUILD host still looks in lib/aarch64
+  ln -s arm ${PKG_BUILD}/jre/lib/aarch64
 }

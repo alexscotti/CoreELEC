@@ -1,0 +1,131 @@
+bdj: let the disc's own logger be switched on.
+
+Retail BD-J discs built with the "radius" menu engines (Lionsgate's
+com.lge.radius, Universal's com.uni.radius) carry a logger compiled in but
+switched off - an obfuscated class with a static one-int-arg setter for a
+minimum log level, shipped at 999 so nothing prints. Switched on, the disc
+narrates itself: title changes, state machine transitions, resource loading,
+and which playlist it decided to start.
+
+That is the only direct view of a disc's own decisions. Everything else is
+inference from libbluray's side. It is what identified why John Wick 1/3/4
+and Hereditary never reached their menus: with a BD-J resume record present
+the engine ends in a state whose only exit is a presentation that plays no
+playlist, so nothing is ever demuxed and the overlay is never composited.
+
+Off unless BD_DISC_LOG is set, and any failure to enable is logged and
+swallowed, so a disc playing normally cannot be affected.
+
+  BD_DISC_LOG=1        try the known engines
+  BD_DISC_LOG=gv.aN    that class and setter, level 0
+  BD_DISC_LOG=gv.aN=0  the same, level given explicitly
+
+Kodi debug logging has to be on as well: this logger reaches the Kodi log as
+CBlurayCallback::Logger, which is LOGDEBUG, so at Kodi's default level both
+the enable line and everything the disc prints are dropped.
+
+Names are obfuscated per authoring-tool build, so a disc outside the known
+set needs the explicit form. Find it with javap on the disc's JAR: the setter
+is a one-line "public static void x(int)" writing a static int that the
+engine's log method compares the message level against.
+
+--- a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
++++ b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
+@@ -260,6 +260,85 @@
+         return false;
+     }
+ 
++    /* Retail BD-J discs built with the "radius" menu engines (Lionsgate's
++       com.lge.radius, Universal's com.uni.radius) carry a logger of their own,
++       compiled in but switched off: an obfuscated class with a static
++       one-int-arg setter for a minimum log level, shipped at 999 so nothing
++       prints. Switched on, the disc narrates itself - title changes, state
++       machine transitions, resource loading, which playlist it decided to
++       start - which is the only direct view of why a menu never appears.
++       Everything else is inference from this side of the fence.
++
++       This found the John Wick 1/3/4 and Hereditary failure: the discs were
++       ending in a state whose only exit needs a playlist nobody plays.
++
++       Disabled unless BD_DISC_LOG is set, and any failure to enable is logged
++       and swallowed, so it cannot affect a disc that is playing normally.
++
++       Kodi debug logging has to be on as well. This logger reaches the Kodi
++       log as CBlurayCallback::Logger, which is LOGDEBUG, so at Kodi's default
++       level both the line below and everything the disc prints are dropped.
++
++         BD_DISC_LOG=1        try the known engines
++         BD_DISC_LOG=gv.aN    that class and setter, level 0
++         BD_DISC_LOG=gv.aN=0  the same, level given explicitly
++
++       The names are obfuscated per authoring-tool build, so a disc outside the
++       known set needs the explicit form. Find it with javap on the disc's JAR:
++       the setter is a one-line "public static void x(int)" that writes a static
++       int which the engine's log method compares the message level against. */
++    private static final String[] KNOWN_DISC_LOGGERS = { "gv.aN" };
++
++    private void enableDiscLogging() {
++        String spec = System.getenv("BD_DISC_LOG");
++        if (spec == null)
++            return;
++        spec = spec.trim();
++        if (spec.length() == 0 || spec.equals("0"))
++            return;
++
++        int level = 0;
++        String[] targets;
++        if (spec.equals("1")) {
++            targets = KNOWN_DISC_LOGGERS;
++        } else {
++            int eq = spec.indexOf('=');
++            if (eq >= 0) {
++                try {
++                    level = Integer.parseInt(spec.substring(eq + 1).trim());
++                } catch (NumberFormatException nfe) {
++                    logger.error("BD_DISC_LOG: not a level: " + spec);
++                    return;
++                }
++                spec = spec.substring(0, eq).trim();
++            }
++            targets = new String[] { spec };
++        }
++
++        ClassLoader cl = xlet.getClass().getClassLoader();
++        for (int i = 0; i < targets.length; i++) {
++            int dot = targets[i].lastIndexOf('.');
++            if (dot < 1 || dot == targets[i].length() - 1) {
++                logger.error("BD_DISC_LOG: expected <class>.<method>, got: " + targets[i]);
++                continue;
++            }
++            String cls = targets[i].substring(0, dot);
++            String mth = targets[i].substring(dot + 1);
++            try {
++                Class.forName(cls, true, cl)
++                     .getMethod(mth, new Class[] { int.class })
++                     .invoke(null, new Object[] { new Integer(level) });
++                logger.error("BD_DISC_LOG: enabled via " + cls + "." + mth + "(" + level + ")");
++                return;
++            } catch (ClassNotFoundException cnfe) {
++                /* Not this engine. Try the next candidate. */
++            } catch (Throwable t) {
++                logger.error("BD_DISC_LOG: " + cls + "." + mth + " failed: " + t);
++            }
++        }
++        logger.error("BD_DISC_LOG: no disc logger matched " + java.util.Arrays.asList(targets));
++    }
++
+     private boolean doStart(String[] args) {
+         if (((state == NOT_LOADED) || (state == LOADED)) && !doInit())
+             return false;
+@@ -268,6 +347,11 @@
+                 if (args != null)
+                     context.setArgs(args);
+                 xlet.startXlet();
++                /* After startXlet, never before: the disc parses its own
++                   projectsettings.xml in there, and that parse writes the log
++                   level (these discs ship minLogLevel 8000). Enabling first
++                   just gets overwritten. */
++                enableDiscLogging();
+                 state = STARTED;
+                 return true;
+             } catch (Throwable e) {

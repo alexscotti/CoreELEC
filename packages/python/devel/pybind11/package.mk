@@ -15,3 +15,14 @@ pre_configure_host() {
   cd ..
   rm -rf .${HOST_NAME}
 }
+
+pre_make_host() {
+  # scikit-build-core locates cmake by searching PATH, and raises
+  # CMakeNotFoundError if it is not on it - which is what killed this package
+  # at 82/375 on a cold parallel build even with cmake:host declared and
+  # already built (verified: the same search succeeds with ${TOOLCHAIN}/bin on
+  # PATH and fails with exactly that error without it). cmake:host installs to
+  # ${TOOLCHAIN}/bin and is a declared dependency, so name it outright rather
+  # than depend on what PATH happens to hold.
+  export CMAKE_EXECUTABLE="${TOOLCHAIN}/bin/cmake"
+}

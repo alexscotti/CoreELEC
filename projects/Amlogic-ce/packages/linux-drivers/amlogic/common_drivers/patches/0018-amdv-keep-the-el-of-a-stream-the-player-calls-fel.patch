@@ -1,0 +1,91 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: amdv: keep the EL of a stream the player calls FEL
+
+The Dolby Vision core tells the base-layer decoder to stop feeding the
+enhancement layer whenever its metadata parser returns MEL for an RPU
+("bypass MEL"). For a real minimum enhancement layer that is right. It is not a
+cheap hint, though: the receiving decoder latches bypass_dvenl_enable, which
+drops it from DECODE_MODE_MULTI_DVBAL to plain streambase, and a streambase base
+layer never reports HEVC_FIND_NEXT_DVEL_NAL - the only event that ever hands the
+shared core to the enhancement decoder. The layer pair stops alternating
+permanently and nothing clears the latch.
+
+On a profile 7 FEL Blu-ray the verdict is wrong. Measured on John Wick 3 on an
+AM9 Pro (S6), which the player opens as "profile 7, full enhancement layer":
+
+    honoured:  dveldec ready 118462  scheduled 5     20.65fps, 165 stutters/65s
+    ignored:   dveldec ready  40135  scheduled 1469  23.99fps, 0 stutters
+
+Three events are enough to latch it and the first arrives inside the first
+second of the feature, so the whole film plays base-layer-only with a repeated
+frame roughly every 400ms.
+
+The closed parser cannot be second-guessed from in here, and does not need to be:
+the player already tells us. enable_fel is set for exactly those sessions whose
+RPU it read as FEL, and cleared when the decoder closes. This file already
+consults it four times to stop a FEL stream being dropped to SDR, so the same
+knowledge belongs in this decision - a MEL stream keeps the optimisation it is
+entitled to, and a FEL stream keeps its enhancement layer.
+
+Both call sites here are patched. amdv_hw5_process.c carries the same two blocks
+but cannot see enable_fel (static to this file); the hardware this was measured
+on takes the paths here, logging "bypass MEL", which is this file.
+---
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -8284,7 +8284,26 @@
+ 			if (force_mel)
+ 				ret_flags = 1;
+ 
+-			if (ret_flags && req.dv_enhance_exist) {
++			/*
++			 * Not when the player has declared this session FEL.
++			 * ret_flags is the Dolby metadata parser verdict and 1
++			 * means "minimum enhancement layer": no residual, so
++			 * the base layer may as well run alone. Acting on it is
++			 * not free - the receiving decoder latches
++			 * bypass_dvenl_enable, which drops it out of
++			 * DECODE_MODE_MULTI_DVBAL, and a streambase base layer
++			 * never reports HEVC_FIND_NEXT_DVEL_NAL, the only event
++			 * that hands the shared core to the enhancement
++			 * decoder. The pair then stops alternating for good.
++			 *
++			 * On a profile 7 FEL disc that verdict is wrong, and
++			 * enable_fel is how we know: the player sets it for
++			 * exactly the streams whose RPU it read as FEL, and
++			 * clears it when the decoder closes. It already guards
++			 * the FEL paths just below that would otherwise fall
++			 * back to SDR; the same knowledge belongs here.
++			 */
++			if (ret_flags && req.dv_enhance_exist && !enable_fel) {
+ 				if (!strcmp(dv_provider[0], "dvbldec"))
+ 					vf_notify_provider_by_name
+ 					(dv_provider[0],
+@@ -9935,7 +9954,26 @@
+ 			if (force_mel)
+ 				ret_flags = 1;
+ 
+-			if (ret_flags && req.dv_enhance_exist) {
++			/*
++			 * Not when the player has declared this session FEL.
++			 * ret_flags is the Dolby metadata parser verdict and 1
++			 * means "minimum enhancement layer": no residual, so
++			 * the base layer may as well run alone. Acting on it is
++			 * not free - the receiving decoder latches
++			 * bypass_dvenl_enable, which drops it out of
++			 * DECODE_MODE_MULTI_DVBAL, and a streambase base layer
++			 * never reports HEVC_FIND_NEXT_DVEL_NAL, the only event
++			 * that hands the shared core to the enhancement
++			 * decoder. The pair then stops alternating for good.
++			 *
++			 * On a profile 7 FEL disc that verdict is wrong, and
++			 * enable_fel is how we know: the player sets it for
++			 * exactly the streams whose RPU it read as FEL, and
++			 * clears it when the decoder closes. It already guards
++			 * the FEL paths just below that would otherwise fall
++			 * back to SDR; the same knowledge belongs here.
++			 */
++			if (ret_flags && req.dv_enhance_exist && !enable_fel) {
+ 				if (!strcmp(dv_provider[vd_path], "dvbldec") ||
+ 					!strcmp(dv_provider[vd_path], "dvbldec2"))
+ 					vf_notify_provider_by_name

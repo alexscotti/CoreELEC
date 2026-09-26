@@ -1,0 +1,90 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: VideoPlayer: a title's enhancement-layer type must outlive its codec
+
+Whether a Dolby Vision title carries a full enhancement layer is a property of
+the stream, and it can only be learned by watching: the converter latches FEL
+when an RPU finally shows residual, which for a decoder opened mid-GOP is not
+the first RPU it sees.
+
+CProcessInfo is where that answer is kept, and three places already rely on it
+holding for the title - CVideoPlayer's two FEL branches and the player-info
+hdrDetail line that prints "FEL" or "MEL". But ResetVideoCodecInfo() cleared it,
+and that runs on EVERY codec creation, which on a Blu-ray includes each
+menu->feature transition. The answer was therefore thrown away moments before
+the feature's decoder asked for it, and a converter built fresh for that open
+starts again from "MEL".
+
+Stop clearing it, and let a new converter be seeded from what the title already
+proved. Latching only on the positive keeps the decision one-way: a genuine MEL
+stream's RPU never reads FEL, so this can recover a missed FEL and cannot invent
+one.
+
+Carried as a patch rather than a fork of coreelec-xbmc: pinning the Kodi package
+at our own fork meant every upstream Kodi bump conflicted on PKG_VERSION and
+forced a second fork to be rebased and pushed in lockstep.
+---
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+index f8339dd..31a5641 100644
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+@@ -1028,6 +1028,20 @@ bool CDVDVideoCodecAmlogic::AddData(const DemuxPacket &packet)
+       pData = m_bitstream->GetConvertBuffer();
+       iSize = m_bitstream->GetConvertSize();
+       doviIsFEL = m_bitstream->GetDoviIsFEL();
++      // A converter is rebuilt for every open and starts out believing the
++      // stream is MEL until an RPU proves otherwise, so a feature that
++      // reopens mid-GOP can configure the decoder for the wrong layer type.
++      // CProcessInfo outlives the codec and carries what earlier opens
++      // learned, so trust it and tell this converter too. Latching on the
++      // positive keeps it one-way: a genuine MEL stream never reads FEL, so
++      // this can only recover a missed FEL, never invent one.
++      if (doviIsFEL)
++        m_processInfo.SetDoviIsFEL(true);
++      else if (m_processInfo.GetDoviIsFEL())
++      {
++        doviIsFEL = true;
++        m_bitstream->SetDoviIsFEL(true);
++      }
+       // The converter may only recognise a full enhancement layer partway into a
+       // title - a decoder opened mid-GOP sees no residual in its first RPU - so
+       // the copy CAMLCodec took at OpenDecoder can go stale. Push the change
+diff --git a/xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp b/xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp
+index 212abba..7b097bc 100644
+--- a/xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp
++++ b/xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp
+@@ -79,7 +79,18 @@ void CProcessInfo::ResetVideoCodecInfo()
+   m_videoQueueLevel = 0;
+   m_videoQueueDataLevel = 0;
+   m_videoIsInterlaced = false;
+-  m_doviIsFEL = false;
++  /* m_doviIsFEL is deliberately NOT reset here. Whether a title carries a
++   * full enhancement layer is a property of the STREAM, not of the codec
++   * instance, and it can only be learned by observation - the converter
++   * sets it once an RPU shows residual, which for a decoder opened mid-GOP
++   * is not the first RPU it sees. This function runs on EVERY codec
++   * creation, which on a Blu-ray includes each menu->feature transition,
++   * so clearing it here threw the answer away moments before the feature's
++   * decoder asked for it. Three places already depend on the flag holding
++   * for the title - CVideoPlayer's FEL branches and the player-info
++   * hdrDetail line that prints "FEL" or "MEL".
++   * It lives as long as this CProcessInfo, one of which is constructed per
++   * CVideoPlayer, so the next playback still starts from false. */
+   m_deintMethods.clear();
+   m_deintMethods.push_back(EINTERLACEMETHOD::VS_INTERLACEMETHOD_NONE);
+   m_deintMethodDefault = EINTERLACEMETHOD::VS_INTERLACEMETHOD_NONE;
+diff --git a/xbmc/utils/BitstreamConverter.h b/xbmc/utils/BitstreamConverter.h
+index 1c95df6..3eb8807 100644
+--- a/xbmc/utils/BitstreamConverter.h
++++ b/xbmc/utils/BitstreamConverter.h
+@@ -230,6 +230,11 @@ public:
+   // CMV40_AUTO trigger. Set BEFORE SetAppendCMv40, like the bypass inputs.
+   void SetCMv40AutoTrigger(enum DOVICMv40AutoTrigger value) { m_cmv40_auto_trigger = value; }
+   bool GetDoviIsFEL() const { return m_doviIsFEL; }
++  /* FEL is discovered by seeing residual in an RPU, and a fresh converter
++   * is built for every decoder open - so a title already known to carry a
++   * full enhancement layer would be re-guessed as MEL at each reopen.
++   * The owner seeds what earlier opens established. */
++  void SetDoviIsFEL(bool value) { m_doviIsFEL = value; }
+   //! @brief Whether the access unit just converted contained an IRAP (IDR/CRA/BLA).
+   //! A seamless Blu-ray branch is authored to start on one, and that IRAP is what
+   //! resets decoder references. Only the dual-layer overload classifies the unit,

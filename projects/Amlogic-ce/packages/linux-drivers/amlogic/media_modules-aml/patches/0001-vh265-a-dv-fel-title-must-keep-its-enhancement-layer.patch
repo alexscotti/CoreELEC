@@ -1,0 +1,102 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: vh265: a Dolby Vision FEL title must keep its enhancement layer
+
+The Dolby Vision core asks the base-layer decoder to stop feeding the
+enhancement layer whenever its metadata parser returns MEL for an RPU
+("bypass MEL" in amdv.c). That request latches bypass_dvenl_enable, which drops
+the decoder from DECODE_MODE_MULTI_DVBAL to plain streambase - and a streambase
+base layer never reports HEVC_FIND_NEXT_DVEL_NAL, the only event that ever hands
+the shared core to the enhancement decoder. The pair stops alternating
+permanently and nothing clears the latch.
+
+On a profile 7 FEL Blu-ray the verdict is wrong. The RPU's own el_type field
+reads "FEL", and the enhancement layer carries 8-27KB per frame of residual
+against 512-569 bytes for a genuinely minimal one. Measured on John Wick 3 on
+the AM9 Pro, which the player opens as "profile 7, full enhancement layer":
+
+    honoured:  dveldec ready 118462  scheduled 5     20.65fps, 165 stutters/65s
+    ignored:   dveldec ready  40135  scheduled 1469  23.99fps, 0 stutters
+
+Three events are enough to latch it, and it arrives in the first second of the
+feature, so the whole film plays base-layer-only with a repeated frame roughly
+every 400ms.
+
+Ignore the request by default. When the core's verdict is right the cost is one
+wasted decode of a residual-free layer, and the measurement above is the
+expensive case holding full rate, so the headroom is there. Clear
+dv_ignore_bypass_el to get the stock behaviour back.
+---
+--- a/drivers/frame_provider/decoder/h265/vh265.c
++++ b/drivers/frame_provider/decoder/h265/vh265.c
+@@ -571,6 +571,12 @@
+ static u32 dv_debug;
+ 
+ static u32 force_bypass_dvenl;
++/*
++ * Ignore the Dolby Vision core's request to stop feeding the enhancement
++ * layer. See the event handler for why that request is wrong on a profile 7
++ * FEL Blu-ray. On by default; clear it to get the stock behaviour back.
++ */
++static u32 dv_ignore_bypass_el = 1;
+ #endif
+ #endif
+ 
+@@ -9853,9 +9859,45 @@
+ 	else if (type & VFRAME_EVENT_RECEIVER_DOLBY_BYPASS_EL) {
+ 		if ((force_bypass_dvenl & 0x80000000) == 0) {
+ 			hevc_print(hevc, 0,
+-			"%s: VFRAME_EVENT_RECEIVER_DOLBY_BYPASS_EL\n",
+-			__func__);
+-			hevc->bypass_dvenl_enable = 1;
++			"%s: VFRAME_EVENT_RECEIVER_DOLBY_BYPASS_EL%s\n",
++			__func__, dv_ignore_bypass_el ? " (ignored)" : "");
++			/*
++			 * The Dolby Vision core sends this - "bypass MEL" in
++			 * amdv.c - when its metadata parser returns MEL for an
++			 * RPU. A minimum enhancement layer carries no residual,
++			 * so there is nothing to gain from decoding it and the
++			 * base layer may as well run alone.
++			 *
++			 * Honouring it is not a cheap no-op, though: it latches
++			 * bypass_dvenl_enable, which drops this decoder from
++			 * DECODE_MODE_MULTI_DVBAL to plain streambase - and a
++			 * streambase base layer never reports
++			 * HEVC_FIND_NEXT_DVEL_NAL, which is the ONLY thing that
++			 * ever hands the shared core to the enhancement
++			 * decoder. The pair stops alternating for good, and
++			 * nothing clears the latch.
++			 *
++			 * On a profile 7 FEL title that verdict is wrong. The
++			 * RPU's own el_type field reads "FEL" (libdovi, in the
++			 * player) and the enhancement layer carries 8-27KB per
++			 * frame of residual, against 512-569 bytes for a
++			 * genuinely minimal one. Measured on John Wick 3, which
++			 * the player opens as "profile 7, full enhancement
++			 * layer": the event arrives in the first second of the
++			 * feature and from then on the enhancement decoder is
++			 * ready 118462 times and scheduled 5. The base layer
++			 * plays alone at 20.7fps with a repeated frame every
++			 * ~400ms - 165 of them in 65 seconds. Ignoring it, the
++			 * layers stay in lockstep (1402 frames each) at
++			 * 23.99fps with no repeated frame at all.
++			 *
++			 * When the verdict IS right the cost is one wasted
++			 * decode of a residual-free layer, and there is room
++			 * for it: the FEL case above is the expensive one and
++			 * it holds full rate.
++			 */
++			if (!dv_ignore_bypass_el)
++				hevc->bypass_dvenl_enable = 1;
+ 		}
+ 	}
+ #endif
+@@ -16963,6 +17005,9 @@
+ MODULE_PARM_DESC(dv_debug, "\n dv_debug\n");
+ 
+ module_param(force_bypass_dvenl, uint, 0664);
++MODULE_PARM_DESC(dv_ignore_bypass_el,
++	"\n ignore the dv core's bypass-el request (wrong on profile 7 FEL)\n");
++module_param(dv_ignore_bypass_el, uint, 0664);
+ MODULE_PARM_DESC(force_bypass_dvenl, "\n force_bypass_dvenl\n");
+ #endif
+ 

@@ -1,0 +1,191 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: amdv: owe an EL only for a BL that is still missing one
+
+0013 realigns the EL queue by retiring stale ELs at pairing time, which is the
+right place for it. Its surplus term is wrong, though, and on a FEL Blu-ray it
+throws away live frames:
+
+    owed = (bl_put - el_put) - dvel_put_base + held
+
+dvel_put_base is captured in one place only - dvel_put_baseline(), at
+VFRAME_EVENT_PROVIDER_REG, when the pipeline is still empty - and
+dvel_miss_reset_locked() sets it back to 0. But the standing difference between
+those two put counts is pipeline depth: ELs paired and held with BLs that have
+already been returned. Captured before the pipeline fills, the baseline absorbs
+none of it, so the depth itself reads as surplus on every call:
+
+    dvel: bl put 2024 el put 2018 held 0 - retired 6 stale el
+
+held 0, base 0 - those six ELs were in flight, not stale. It discards them, the
+depth re-establishes, and it does it again. Measured on John Wick 3, one 200s
+play on the AM9 Pro:
+
+    dvel_miss_count    6      BLs genuinely shown without their EL
+    dvel_retire_count  188    ELs actually discarded
+
+Thirty discards per real orphan, in bursts of six or seven - 250 to 420ms of
+frozen picture each, two of them inside the first twelve seconds of the feature.
+
+Only a BL shown without its EL strands one, and those are already recorded in
+dvel_miss_bl[], so count them instead of inferring a surplus from put counts.
+Not all of them, though: dvel_noel_bl[] holds the BLs the decoder produced no EL
+for at all, and nothing is owed for those - they are in dvel_miss_bl[] too, so
+counting the list alone would over-retire by exactly the number of them. The
+term is held misses minus noel, which is what dvel_noel_locked() subtracts.
+
+dvel_put_base, dvel_put_rebase, dvel_put_baseline() and dvel_put_count() have no
+remaining callers and are removed with it. dvel_noel_bl[] stays and is now read
+directly rather than folded into a rebase.
+---
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -2282,8 +2282,6 @@
+  * still to come and must not count as owed ELs after a rebase.
+  */
+ static struct vframe_s *dvel_noel_bl[16];
+-static s32 dvel_put_base;
+-static bool dvel_put_rebase;
+ static unsigned int dvel_miss_count;
+ module_param(dvel_miss_count, uint, 0444);
+ MODULE_PARM_DESC(dvel_miss_count, "BL frames composited without their EL");
+@@ -2291,31 +2289,11 @@
+ module_param(dvel_retire_count, uint, 0444);
+ MODULE_PARM_DESC(dvel_retire_count, "stale EL frames retired to realign the EL queue");
+ 
+-static bool dvel_put_count(const char *provider, u32 *count);
+-
+-/* A new dvel session starts even with the BL decoder: whatever the BL decoder
+- * has already returned before the EL receiver registered owes nothing here.
+- */
+-static void dvel_put_baseline(void)
+-{
+-	unsigned long flags;
+-	u32 bl_put = 0, el_put = 0;
+-
+-	if (!dvel_put_count("dvbldec", &bl_put) ||
+-	    !dvel_put_count("dveldec", &el_put))
+-		return;
+-	spin_lock_irqsave(&amdv_lock, flags);
+-	dvel_put_base = (s32)(bl_put - el_put);
+-	spin_unlock_irqrestore(&amdv_lock, flags);
+-}
+-
+ /* caller holds amdv_lock */
+ static void dvel_miss_reset_locked(void)
+ {
+ 	memset(dvel_miss_bl, 0, sizeof(dvel_miss_bl));
+ 	memset(dvel_noel_bl, 0, sizeof(dvel_noel_bl));
+-	dvel_put_base = 0;
+-	dvel_put_rebase = false;
+ }
+ 
+ /* caller holds amdv_lock */
+@@ -2331,6 +2309,17 @@
+ 			dvel_noel_bl[i] = NULL;
+ }
+ 
++/* caller holds amdv_lock */
++static bool dvel_noel_locked(const struct vframe_s *bl)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(dvel_noel_bl); i++)
++		if (dvel_noel_bl[i] == bl)
++			return true;
++	return false;
++}
++
+ /* A BL the decoder gave no EL: nothing is owed for it, now or when it is put. */
+ static void dvel_note_noel(struct vframe_s *bl)
+ {
+@@ -2346,7 +2335,6 @@
+ 	}
+ 	if (i == ARRAY_SIZE(dvel_noel_bl) && free >= 0)
+ 		dvel_noel_bl[free] = bl;
+-	dvel_put_rebase = true;
+ 	spin_unlock_irqrestore(&amdv_lock, flags);
+ }
+ 
+@@ -2379,55 +2367,27 @@
+ 	spin_unlock_irqrestore(&amdv_lock, flags);
+ }
+ 
+-/* req.vf == NULL is the decoder's put-count query (vh265.c answers with
+- * atomic_read(&hevc->vf_put_count)). aux_size is seeded with a sentinel so a
+- * provider that does not answer is detected rather than read as zero.
+- */
+-static bool dvel_put_count(const char *provider, u32 *count)
+-{
+-	struct provider_aux_req_s req;
+-
+-	memset(&req, 0, sizeof(req));
+-	req.aux_size = 0xffffffff;
+-	vf_notify_provider_by_name(provider,
+-		VFRAME_EVENT_RECEIVER_GET_AUX_DATA, (void *)&req);
+-	if (req.aux_size == 0xffffffff)
+-		return false;
+-	*count = req.aux_size;
+-	return true;
+-}
+-
+ /* bl is the BL about to be paired: if it is itself a held miss being parsed
+  * again, its EL is the one it is about to take, not a stale one.
+  */
+ static void dvel_retire_owed(const char *bl_provider, struct vframe_s *bl)
+ {
+ 	unsigned long flags;
+-	u32 bl_put, el_put;
+ 	s32 owed;
+ 	int held = 0, n = 0, i;
+ 
+-	if (!bl_provider || !dvel_put_count(bl_provider, &bl_put) ||
+-	    !dvel_put_count("dveldec", &el_put))
++	if (!bl_provider)
+ 		return;
+ 
+ 	spin_lock_irqsave(&amdv_lock, flags);
+-	/* Coming back from BLs that were deliberately not paired (the EL was
+-	 * bypassed): those BL returns are not owed ELs. Start counting afresh.
+-	 */
+-	if (dvel_put_rebase) {
+-		int noel = 0;
+-
+-		for (i = 0; i < ARRAY_SIZE(dvel_noel_bl); i++)
+-			if (dvel_noel_bl[i])
+-				noel++;
+-		dvel_put_base = (s32)(bl_put - el_put) + noel;
+-		dvel_put_rebase = false;
++	for (i = 0; i < ARRAY_SIZE(dvel_miss_bl); i++) {
++		if (!dvel_miss_bl[i] || dvel_miss_bl[i] == bl)
++			continue;
++		if (dvel_noel_locked(dvel_miss_bl[i]))
++			continue;
++		held++;
+ 	}
+-	for (i = 0; i < ARRAY_SIZE(dvel_miss_bl); i++)
+-		if (dvel_miss_bl[i] && dvel_miss_bl[i] != bl)
+-			held++;
+-	owed = (s32)(bl_put - el_put) - dvel_put_base + held;
++	owed = held;
+ 	spin_unlock_irqrestore(&amdv_lock, flags);
+ 
+ 	while (owed > 0 && n < DVEL_RETIRE_MAX && dvel_vf_peek()) {
+@@ -2441,8 +2401,8 @@
+ 	}
+ 	if (n) {
+ 		dvel_retire_count += n;
+-		pr_info_ratelimited("dvel: bl put %u el put %u held %d - retired %d stale el\n",
+-			bl_put, el_put, held, n);
++		pr_info_ratelimited("dvel: %d bl still missing an el - retired %d stale el\n",
++			held, n);
+ 	}
+ }
+ 
+@@ -2581,7 +2541,6 @@
+ 			pr_dv_dbg("%s, provider %s registered\n",
+ 				__func__, provider_name);
+ 		dv_vf_light_reg_provider();
+-		dvel_put_baseline();
+ 	}
+ 	return 0;
+ }

@@ -454,6 +454,9 @@ post_makeinstall_target() {
   if [ -n "${DISTRO_PKG_SETTINGS}" ]; then
     xmlstarlet ed -L --subnode "/addons" -t elem -n "addon" -v "${DISTRO_PKG_SETTINGS_ID}" ${ADDON_MANIFEST}
   fi
+  # Symphony's skin (kodi-theme-Symphony): a system add-on, so Kodi enables it on
+  # first boot and the seed can select it
+  xmlstarlet ed -L --subnode "/addons" -t elem -n "addon" -v "skin.estuary.symphony" ${ADDON_MANIFEST}
 
   # more binaddons cross compile badness meh
   sed -e "s:INCLUDE_DIR /usr/include/kodi:INCLUDE_DIR ${SYSROOT_PREFIX}/usr/include/kodi:g" \

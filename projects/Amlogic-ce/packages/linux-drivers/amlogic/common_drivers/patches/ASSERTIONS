@@ -143,3 +143,7 @@ drivers/media/enhancement/amdolby_vision/amdv.c:		if (vinfo->vout_device && vinf
 
 # --- 9003: frame-packed MVC, VD1 preblend window stops at its own eye ---
 drivers/media/video_sink/video_hw.c:dispbuf->left_eye.height - 1;:1
+
+# --- 9004: frame-packed 3D, OSD planes clip to the packed output height ---
+drivers/drm/meson_plane.c:vinfo->info_3d == FP_3D &&:1
+drivers/drm/meson_plane.c:if ((plane_info->dst_y + plane_info->dst_h) > vlimit) {:1

@@ -1,0 +1,94 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: drm: frame-packed 3D - clip OSD planes to the packed output, not the 2D mode
+
+In HDMI frame packing (1080p24 3D on an AM9 Pro, S6) Kodi's GUI - the INFO and
+seek overlays, every menu - showed in the left eye only.
+
+Kodi renders hardware-based 3D GUI into one plane holding both eyes: 1920x2205
+(1080 lines, the 45-line active space, 1080 lines), and the DRM state shows
+osd0 at that size (crtc-pos 1920x2205). The crtc mode, though, stays the 2D
+"1080p24hz" (vdisplay 1080): frame packing is applied by hdmitx, which records
+it in the vinfo instead (info_3d FP_3D, height 2205; video_sink logs "vout
+changed: 1920x1080->1920x2205"). meson_plane_position_calc() clips every plane
+to mode->vdisplay, so the plane was cut to its top 1080 lines - the left eye.
+Measured during 3D playback: the VPP output is 1920x2205 (VPP_OUT_H_V_SIZE
+0x0780089d), while OSD1's MIF window, scaler, blend and post-blend V scope were
+all 0..1079.
+
+When the vinfo says the output is frame packed and taller than the mode, clip
+to the vinfo height instead. Everything downstream (scaler, OSD blend, post
+blend) sizes itself from the clipped plane, so this is the only limit to move.
+Progressive only; any other output is clipped as before.
+---
+--- a/drivers/drm/meson_plane.c
++++ b/drivers/drm/meson_plane.c
+@@ -19,6 +19,7 @@
+ #include <linux/amlogic/media/amdolbyvision/dolby_vision.h>
+ #endif
+ #include <linux/amlogic/media/video_sink/video.h>
++#include <linux/amlogic/media/vout/vout_notify.h>
+ #include "meson_plane.h"
+ #include "meson_crtc.h"
+ #include "meson_vpu.h"
+@@ -336,12 +337,13 @@
+ 			  struct drm_plane_state *state,
+ 			  struct meson_vpu_pipeline *pipeline)
+ {
+-	u32 dst_w, dst_h, src_w, src_h, scan_mode_out;
++	u32 dst_w, dst_h, src_w, src_h, scan_mode_out, vlimit;
+ 	struct am_osd_plane *amp;
+ 	struct drm_atomic_state *atomic_state = state->state;
+ 	struct drm_crtc *crtc = state->crtc;
+ 	struct drm_crtc_state *crtc_state;
+ 	struct drm_display_mode *mode;
++	struct vinfo_s *vinfo;
+ 
+ 	if (crtc) {
+ 		crtc_state = drm_atomic_get_crtc_state(atomic_state, crtc);
+@@ -355,6 +357,19 @@
+ 	if (!crtc_state || !mode)
+ 		mode = &pipeline->subs[crtc->index].mode;
+ 	scan_mode_out = mode->flags & DRM_MODE_FLAG_INTERLACE;
++
++	/*
++	 * Frame-packed 3D: the output is both eyes plus the active space
++	 * between them (vinfo height 1080 * 2 + 45 = 2205), while the crtc
++	 * mode stays the 2D one (vdisplay 1080). The GUI draws both eyes into
++	 * a plane that tall; clip it to the real output, not to the mode, or
++	 * the second eye's half is cut off and the OSD shows in one eye only.
++	 */
++	vlimit = mode->vdisplay;
++	vinfo = get_current_vinfo();
++	if (!scan_mode_out && vinfo && vinfo->info_3d == FP_3D &&
++	    vinfo->height > vlimit)
++		vlimit = vinfo->height;
+ 	plane_info->src_x = state->src_x >> 16;
+ 	plane_info->src_y = state->src_y >> 16;
+ 	plane_info->src_w = (state->src_w >> 16) & 0xffff;
+@@ -426,14 +441,14 @@
+ 		}
+ 		DRM_DEBUG("(plane_info->dst_x + plane_info->dst_w) > mode->hdisplay\n");
+ 	}
+-	if ((plane_info->dst_y + plane_info->dst_h) > mode->vdisplay) {
+-		if (plane_info->dst_y >= mode->vdisplay) {
++	if ((plane_info->dst_y + plane_info->dst_h) > vlimit) {
++		if (plane_info->dst_y >= vlimit) {
+ 			plane_info->enable = 0;
+ 		} else {
+ 			dst_h = plane_info->dst_h;
+ 			src_h = plane_info->src_h;
+ 			plane_info->dst_h =
+-				mode->vdisplay - plane_info->dst_y;
++				vlimit - plane_info->dst_y;
+ 			plane_info->src_h =
+ 				(src_h * plane_info->dst_h) / dst_h;
+ 		}
+@@ -444,7 +459,7 @@
+ 		plane_info->dst_x = mode->hdisplay - plane_info->dst_w -
+ 			plane_info->dst_x;
+ 	if (plane_info->rotation & DRM_MODE_REFLECT_Y)
+-		plane_info->dst_y = mode->vdisplay - plane_info->dst_h -
++		plane_info->dst_y = vlimit - plane_info->dst_h -
+ 			plane_info->dst_y;
+ 
+ 	plane_info->hdisplay = mode->hdisplay;

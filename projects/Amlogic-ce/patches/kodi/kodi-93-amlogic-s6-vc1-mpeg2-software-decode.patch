@@ -1,0 +1,57 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: Amlogic: decode VC-1 and MPEG-1/2 in software on the S6
+
+On the S905X5 (S6, Ugoos AM9 Pro) the hardware VC-1 and MPEG-2 decoders put
+short horizontal line artifacts on the picture. Measured on our AM9 Pro on
+2026-09-30:
+
+- the lines show only while the video moves; a paused frame is always clean
+- H.264 (same VDEC core) and HEVC on the same rig are clean
+- they persist at 1080p output, so it is not display bandwidth, and it is
+  not the TV
+- the same discs with hardware acceleration disabled for these codecs play
+  clean, with ffmpeg at 10-28% per core
+
+It is a known, unresolved AM9-only problem upstream (CoreELEC forum thread
+58183). Until the decoder is fixed, decline these codecs in the Amlogic
+decoder on the S6 only, so VideoPlayer falls back to ffmpeg; every other SoC
+and every other codec is unchanged. Applies after kodi-90, which touches the
+same file.
+---
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+@@ -169,6 +169,13 @@
+       break;
+     case AV_CODEC_ID_MPEG1VIDEO:
+     case AV_CODEC_ID_MPEG2VIDEO:
++      if (aml_get_cpufamily_id() == AML_S6)
++      {
++        // See the VC-1 case below: same artifact on the same S6 VDEC path.
++        CLog::Log(LOGINFO, "{}: MPEG-1/2 on S6 is decoded in software (VDEC artifacts)",
++                  __MODULE_NAME__);
++        goto FAIL;
++      }
+       if (m_hints.width <= CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(CSettings::SETTING_VIDEOPLAYER_USEAMCODECMPEG2))
+         goto FAIL;
+ 
+@@ -289,10 +296,17 @@
+       CLog::Log(LOGDEBUG, "{}::{} - amcodec does not support RMVB", __MODULE_NAME__, __FUNCTION__);
+       goto FAIL;
+     case AV_CODEC_ID_VC1:
+-      m_pFormatName = "am-vc1";
+-      break;
+     case AV_CODEC_ID_WMV3:
+-      m_pFormatName = "am-wmv3";
++      if (aml_get_cpufamily_id() == AML_S6)
++      {
++        // S6 (S905X5) VDEC shows short horizontal line artifacts on moving
++        // VC-1 and MPEG-2 pictures - never on a paused frame, never on H.264
++        // (same core) or HEVC. Software decode is clean and cheap at 1080p.
++        CLog::Log(LOGINFO, "{}: VC-1/WMV3 on S6 is decoded in software (VDEC artifacts)",
++                  __MODULE_NAME__);
++        goto FAIL;
++      }
++      m_pFormatName = m_hints.codec == AV_CODEC_ID_VC1 ? "am-vc1" : "am-wmv3";
+       break;
+     case AV_CODEC_ID_AVS:
+     case AV_CODEC_ID_CAVS:

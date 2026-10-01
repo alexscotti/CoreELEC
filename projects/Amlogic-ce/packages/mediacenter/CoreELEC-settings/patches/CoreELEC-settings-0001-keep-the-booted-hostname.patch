@@ -1,0 +1,20 @@
+--- a/src/resources/lib/modules/system.py
++++ b/src/resources/lib/modules/system.py
+@@ -368,7 +368,16 @@
+             if not value is None:
+                 self.struct['ident']['settings']['hostname']['value'] = value
+             else:
+-                self.struct['ident']['settings']['hostname']['value'] = self.oe.DISTRIBUTION
++                # Symphony: with no hostname saved here, keep the one the box
++                # booted with -- symphony-hostname.service names it
++                # symphony-coreelec-<channel> before Kodi starts -- instead of
++                # resetting it to the distribution name on every Kodi start.
++                try:
++                    with open('/proc/sys/kernel/hostname') as booted:
++                        value = booted.read().strip()
++                except OSError:
++                    value = ''
++                self.struct['ident']['settings']['hostname']['value'] = value or self.oe.DISTRIBUTION
+ 
+             # timezone
+             timezone = '/storage/.cache/timezone'

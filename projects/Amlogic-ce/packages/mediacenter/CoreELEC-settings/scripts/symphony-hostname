@@ -1,0 +1,84 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026-present Alex Scotti
+
+# Name this box symphony-coreelec-<channel>, the way every Symphony machine
+# names itself (theater common/rpivirt/start + sethostname): the channel is the
+# one digit in SYMPHONY/channel on a USB stick that carries a SYMPHONY
+# directory, and 0 when there is no such stick. Avahi publishes the result as
+# symphony-coreelec-<channel>.local.
+#
+# Runs once per boot, after network-base-setup has applied the hostname cached
+# in /storage/.cache/hostname and before avahi and Kodi start, so both see the
+# final name. The CoreELEC settings add-on re-applies its own hostname when
+# Kodi starts; it is patched to keep this one when none has been saved there.
+#
+# SYMPHONY_HOSTNAME_ROOT / SYMPHONY_HOSTNAME_WAIT are for the test only.
+
+ROOT="${SYMPHONY_HOSTNAME_ROOT:-}"
+WAIT="${SYMPHONY_HOSTNAME_WAIT:-20}"
+ROLE="coreelec"
+
+# Where a stick can be: /flash is this box's own boot stick (its FAT
+# partition), and udevil mounts every other USB filesystem under /var/media.
+find_symphony_dir() {
+  for mnt in "${ROOT}/flash" "${ROOT}"/var/media/*; do
+    if [ -d "${mnt}/SYMPHONY" ]; then
+      echo "${mnt}/SYMPHONY"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# A filesystem on a removable USB disk that udevil has not mounted yet. udevil
+# mounts asynchronously after udev coldplug, so a stick present at power-on
+# can still be on its way when this runs.
+usb_mount_pending() {
+  [ -n "${ROOT}" ] && return 1
+  for disk in /sys/block/sd*; do
+    [ "$(cat "${disk}/removable" 2>/dev/null)" = "1" ] || continue
+    for part in /dev/"${disk##*/}"*; do
+      [ -b "${part}" ] || continue
+      [ -n "$(blkid -o value -s TYPE "${part}" 2>/dev/null)" ] || continue
+      grep -q "^${part} " /proc/mounts || return 0
+    done
+  done
+  return 1
+}
+
+dir=""
+waited=0
+while :; do
+  dir="$(find_symphony_dir)" && break
+  dir=""
+  usb_mount_pending || break
+  [ "${waited}" -ge "${WAIT}" ] && break
+  sleep 1
+  waited=$((waited + 1))
+done
+
+channel=0
+source="no SYMPHONY stick"
+if [ -n "${dir}" ]; then
+  source="${dir}, no channel file"
+  if [ -f "${dir}/channel" ]; then
+    value="$(head -n 1 "${dir}/channel" | tr -d ' \t\r')"
+    case "${value}" in
+      [0-9])
+        channel="${value}"
+        source="${dir}/channel"
+        ;;
+      *)
+        source="${dir}/channel holds '${value}', not one digit"
+        ;;
+    esac
+  fi
+fi
+
+name="symphony-${ROLE}-${channel}"
+cache="${ROOT}/storage/.cache/hostname"
+mkdir -p "${cache%/*}"
+[ "$(cat "${cache}" 2>/dev/null)" = "${name}" ] || echo "${name}" >"${cache}"
+echo "${name}" >"${ROOT}/proc/sys/kernel/hostname"
+echo "symphony-hostname: ${name} (channel ${channel}: ${source})"

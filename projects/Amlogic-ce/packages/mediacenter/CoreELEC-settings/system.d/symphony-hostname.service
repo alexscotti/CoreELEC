@@ -1,0 +1,12 @@
+[Unit]
+Description=Symphony hostname (symphony-coreelec-<channel>)
+After=network-base.service
+Before=avahi-daemon.service kodi.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/coreelec/symphony-hostname
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

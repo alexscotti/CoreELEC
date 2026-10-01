@@ -15,6 +15,11 @@ PKG_MAKE_OPTS_TARGET="DISTRONAME=${DISTRONAME} \
                       ROOT_PASSWORD=${ROOT_PASSWORD}"
 
 post_makeinstall_target() {
+  # Symphony: scripts/symphony-hostname names the box
+  # symphony-coreelec-<channel> from a SYMPHONY USB stick (0 without one), and
+  # patches/ keeps the add-on from resetting it to CoreELEC at Kodi start.
+  sh ${PKG_DIR}/test_symphony_hostname.sh
+
   mkdir -p ${INSTALL}/usr/lib/coreelec
   cp ${PKG_DIR}/scripts/* ${INSTALL}/usr/lib/coreelec
 
@@ -26,4 +31,5 @@ post_makeinstall_target() {
 post_install() {
   enable_service backup-restore.service
   enable_service factory-reset.service
+  enable_service symphony-hostname.service
 }

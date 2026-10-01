@@ -99,10 +99,12 @@ drivers/media/enhancement/amdolby_vision/amdv.c:static void dvel_retire_owed(con
 drivers/media/enhancement/amdolby_vision/amdv.c:dvel_retire_owed(dv_provider[vd_path], vf);:2
 drivers/media/enhancement/amdolby_vision/amdv.c:dvel_note_miss(vf, true, true);:1
 drivers/media/enhancement/amdolby_vision/amdv.c:dvel_miss_put_locked(vf);:1
-drivers/media/enhancement/amdolby_vision/amdv.c:dvel_put_baseline();:1
+# removed by 9002 (owe an EL only for a BL still missing one), which replaces the put baseline
+drivers/media/enhancement/amdolby_vision/amdv.c:dvel_put_baseline();:0
 drivers/media/enhancement/amdolby_vision/amdv.c:dvel_note_miss(vf, true, false);:1
 drivers/media/enhancement/amdolby_vision/amdv.c:dvel_note_noel(vf);:1
-drivers/media/enhancement/amdolby_vision/amdv.c:dvel_put_base = (s32)(bl_put - el_put) + noel;:1
+# removed by 9002 (owe an EL only for a BL still missing one), which replaces the put baseline
+drivers/media/enhancement/amdolby_vision/amdv.c:dvel_put_base = (s32)(bl_put - el_put) + noel;:0
 drivers/media/enhancement/amdolby_vision/amdv.c:dvel_unreg_multi = true;:1
 drivers/media/video_sink/video.c:	amdv_vf_put(vf);:1
 drivers/media/video_sink/video.c:dvel_realign_to_bl:0

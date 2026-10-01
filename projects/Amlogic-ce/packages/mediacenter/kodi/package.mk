@@ -11,6 +11,8 @@ PKG_SITE="http://www.kodi.tv"
 PKG_URL="https://github.com/alexscotti/xbmc-real/archive/${PKG_VERSION}.tar.gz"
 PKG_DEPENDS_TARGET="toolchain JsonSchemaBuilder:host TexturePacker:host Python3 zlib systemd lzo pcre2 swig:host libass curl exiv2 fontconfig fribidi tinyxml tinyxml2 libjpeg-turbo freetype libcdio taglib libxml2 libxslt nlohmann-json sqlite ffmpeg crossguid libfmt lirc libfstrcmp flatbuffers:host flatbuffers libudfread spdlog obu_util libdovi"
 PKG_DEPENDS_UNPACK="commons-lang3 commons-text groovy"
+# media/splash.png comes from the splash art (post_unpack); rebuild when it changes
+PKG_NEED_UNPACK="${DISTRO_DIR}/${DISTRO}/splash/${DEVICE}"
 PKG_DEPENDS_HOST="toolchain"
 PKG_LONGDESC="A free and open source cross-platform media player."
 PKG_BUILD_FLAGS="+speed"

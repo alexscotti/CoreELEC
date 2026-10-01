@@ -1,0 +1,49 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: video: frame-packed MVC - VD1 stops at the end of its own eye
+
+3D Blu-ray MVC played as HDMI frame packing on an AM9 Pro (S6) showed the left
+eye on top, a green band where the active space is, and black where the right
+eye belongs. Both views do reach the video layer: the MVC frame's view 0 goes
+to VD1 and view 1 to VD2 (both MIFs enabled, reading different buffers - the
+captured buffers are the same instant with depth-dependent horizontal
+parallax), VD2_BLEND_SRC_CTRL routes VD2 into the preblend (0x2), and VD2's
+window is the lower eye slot (lines 1125..2204 of 1920x2205).
+
+What hides it is VD1's preblend window. config_vd_blend() does compute an MVC
+window, then unconditionally overwrites it with the generic one - the post
+blend span, or 0..VPP_PREBLEND_VD_V_END_LIMIT-1 (read back as 0x8FF = 2303) -
+and its 3D fix-up only handles MODE_3D_OUT_TB and MODE_3D_OUT_LR, not frame
+packing. So VD1, whose picture is 1080 lines, owns the whole packed frame and
+its empty area covers VD2.
+
+Writing VPP_PREBLEND_VD1_V_START_END (0x1d1b) to 0..1079 by hand during
+playback made the right eye appear. Do that in config_vd_blend() for an MVC
+frame under framepacking_support, from the eye height the decoder records
+(left_eye.height), so the window follows the stream rather than a constant.
+
+Top/bottom and side-by-side output are untouched; they also showed one eye on
+this box and are not fixed by this.
+---
+--- a/drivers/media/video_sink/video_hw.c
++++ b/drivers/media/video_sink/video_hw.c
+@@ -6339,6 +6339,20 @@
+ 				cur_frame_par->VPP_vd_start_lines_;
+ 			setting->preblend_v_end =
+ 				cur_frame_par->VPP_vd_end_lines_;
++		} else if (dispbuf && (dispbuf->type & VIDTYPE_MVC) &&
++			   framepacking_support &&
++			   dispbuf->left_eye.height) {
++			/*
++			 * Frame packing: VD1 carries the left eye only, VD2 the
++			 * right eye in the lower slot of the packed frame. The
++			 * generic preblend window above spans the whole packed
++			 * frame (0..VPP_PREBLEND_VD_V_END_LIMIT-1), so VD1's
++			 * empty area covers VD2: one eye, a green active-space
++			 * band, black below. Stop VD1 at the end of its eye.
++			 */
++			setting->preblend_v_start = 0;
++			setting->preblend_v_end =
++				dispbuf->left_eye.height - 1;
+ 		}
+ 	}
+ #endif

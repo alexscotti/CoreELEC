@@ -4,7 +4,7 @@
 PKG_NAME="kodi-theme-Symphony"
 PKG_VERSION="1.0"
 PKG_LICENSE="GPL-2.0-only AND CC-BY-SA-4.0"
-PKG_SITE="https://github.com/alexscotti/CoreELEC-real"
+PKG_SITE="https://github.com/alexscotti/CoreELEC"
 PKG_URL=""
 PKG_DEPENDS_TARGET="kodi"
 PKG_DEPENDS_UNPACK="kodi"

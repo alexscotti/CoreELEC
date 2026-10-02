@@ -56,9 +56,10 @@ echo "== slot B verified"
 '''
 
 
-def bundle(installer=STUB, sha=None, drop=None, payload=b'S' * 300000):
+def bundle(installer=STUB, sha=None, drop=None, payload=b'S' * 300000, extra=None):
     files = {'kernel.img': b'K' * 1000, 'SYSTEM': payload, 'dovi.ko': b'D' * 100,
              'am9slot.sh': installer}
+    files.update(extra or {})
     man = ('SYMPHONY_VERSION=%s\nBUILD_ID=%s\nCOREELEC_VERSION=cv\nam9slot_sha256=%s\n'
            % (VER, 'b' * 40, sha or hashlib.sha256(installer).hexdigest())).encode()
     files['MANIFEST'] = man
@@ -224,6 +225,14 @@ def main():
         upload(bundle(drop='dovi.ko'))
         s = install_and_wait()
         check(s.get('state') == 'error' and 'not a slot bundle' in s.get('error', ''), 'incomplete bundle refused')
+
+        # symphony.tar (the Symphony overlay) is an optional member.
+        upload(bundle(extra={'symphony.tar': b'T' * 100}))
+        s = install_and_wait()
+        check(s.get('state') == 'done', 'bundle with symphony.tar accepted (%s)' % s.get('error', ''))
+        upload(bundle(extra={'stray.bin': b'x'}))
+        s = install_and_wait()
+        check(s.get('state') == 'error' and 'stray.bin' in s.get('error', ''), 'other extra members still refused')
 
         failing = STUB.replace(b'cp "$2/SYSTEM"', b'echo "am9slot: Kodi is playing - refusing" >&2; exit 1; cp "$2/SYSTEM"')
         upload(bundle(installer=failing))

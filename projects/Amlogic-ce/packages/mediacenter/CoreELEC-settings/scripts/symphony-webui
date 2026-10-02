@@ -59,6 +59,7 @@ INSTALL_LOG = os.path.join(DATA, 'install.log')
 CHUNK_SIZE = 8 * 1024 * 1024
 NAME_RE = re.compile(r'^coreelec_[0-9]+_([0-9a-f]{40}|current-[0-9]+)_aarch64_slot\.tar$')
 BUNDLE_FILES = ('MANIFEST', 'kernel.img', 'SYSTEM', 'dovi.ko', 'am9slot.sh')
+BUNDLE_OPTIONAL = ('symphony.tar',)       # the installer unpacks it; this server never opens it
 
 _lock = threading.Lock()          # one install/goback at a time
 _install_thread = None
@@ -194,7 +195,7 @@ def run_install(name, version):
             members = tf.getmembers()
             names = sorted(m.name for m in members)
             missing = [f for f in BUNDLE_FILES if f not in names]
-            extra = [n for n in names if n not in BUNDLE_FILES]
+            extra = [n for n in names if n not in BUNDLE_FILES + BUNDLE_OPTIONAL]
             if missing or extra or not all(m.isfile() for m in members):
                 raise RuntimeError('not a slot bundle (missing %s, unexpected %s)' % (missing, extra))
             for m in members:

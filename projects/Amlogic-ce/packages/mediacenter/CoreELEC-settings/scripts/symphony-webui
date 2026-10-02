@@ -656,6 +656,7 @@ def other_hosts():
 def browse_hosts_forever():
     me = os.uname().nodename
     while True:
+        ok = False
         try:
             found = mdns_browse('_symphony%s._tcp.local.' % channel())
             lst = []
@@ -665,9 +666,12 @@ def browse_hosts_forever():
                     lst.append((m.group(1), 'http://%s/' % host))
             _hosts['list'] = sorted(set(lst))
             _hosts['at'] = time.time()
+            ok = bool(lst)
         except OSError as e:
+            # At boot this starts before the network is up ("Network is
+            # unreachable", measured): try again soon, not in a minute.
             log('mdns browse: %s' % e)
-        time.sleep(60)
+        time.sleep(60 if ok else 5)
 
 
 # ----------------------------------------------------------------- the server
@@ -887,10 +891,22 @@ def _q(s):
     return quote(s, safe='')
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # A browser dropping a connection (a page reload mid-poll) is routine:
+        # one line, not a traceback.
+        e = sys.exc_info()[1]
+        if isinstance(e, (ConnectionResetError, BrokenPipeError)):
+            log('%s: connection dropped (%s)' % (client_address[0], e.__class__.__name__))
+        else:
+            super().handle_error(request, client_address)
+
+
 def main():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
-    srv = ThreadingHTTPServer(('', PORT), Handler)
-    srv.daemon_threads = True
+    srv = Server(('', PORT), Handler)
     if not os.environ.get('SYM_NO_MDNS'):
         threading.Thread(target=browse_hosts_forever, daemon=True).start()
     log('symphony-webui on :%d (flash %s, data %s)' % (PORT, FLASH, DATA))

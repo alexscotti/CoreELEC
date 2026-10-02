@@ -183,6 +183,35 @@ def main():
         s = install_and_wait()
         check(s.get('state') == 'error' and 'Kodi is playing' in s.get('error', ''), 'installer refusal surfaces')
 
+        # Progress: the target slot already holds an OLD build of the same
+        # size (and the same manifest, a reinstall); it must not read as done
+        # before the installer has written anything.
+        slow = STUB.replace(b'cp "$2/SYSTEM"', b'rm -f "$SYM_FLASH/SLOT_B.manifest"; sleep 2; cp "$2/SYSTEM"')
+        sb = bundle(installer=slow)
+        upload(sb)
+        with tarfile.open(fileobj=io.BytesIO(sb)) as tf:
+            open(os.path.join(flash, 'SLOT_B.manifest'), 'wb').write(tf.extractfile('MANIFEST').read())
+        open(os.path.join(flash, 'SYSTEM_B'), 'wb').write(b'S' * 300000)
+        old = time.time() - 3600
+        for f in ('SYSTEM_B', 'SLOT_B.manifest'):
+            os.utime(os.path.join(flash, f), (old, old))
+        req('/host_management', data=b'action=update_firmware')
+        early = None
+        for _ in range(60):
+            s = json.loads(req('/firmware_install_status')[1])
+            if s.get('progress'):
+                early = s['progress']
+                break
+            time.sleep(0.05)
+        check(early is not None and early['pos'] == 0 and early['total'] == 1000 + 300000 + 100,
+              'progress: full total, nothing counted from the old build (%s)' % early)
+        for _ in range(100):
+            s = json.loads(req('/firmware_install_status')[1])
+            if s.get('state') in ('done', 'error'):
+                break
+            time.sleep(0.1)
+        check(s.get('state') == 'done', 'slow install completes')
+
         # goback runs the stick's /flash/am9slot.sh.
         st, page = req('/host_management', data=b'action=revert_firmware')
         check('no installer on this stick yet' in page.decode(), 'goback without /flash/am9slot.sh explains')

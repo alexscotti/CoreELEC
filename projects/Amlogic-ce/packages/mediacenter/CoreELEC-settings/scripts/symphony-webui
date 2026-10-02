@@ -732,21 +732,34 @@ class Handler(BaseHTTPRequestHandler):
             status['detail'] = ''           # already the step
         if status['state'] == 'running':
             run = running_slot()
-            # Bytes written to the target slot, counted only once the
-            # installer has started on it ("== installing", then it deletes
-            # the target's manifest and files first): before that the slot
-            # still holds the OLD build and would read as 100% (measured).
-            started = any(l.startswith('== installing') for l in lines)
-            if run and started and os.path.isdir(STAGE):
+            # Bytes written to the target slot: only files written since the
+            # install started (the slot holds the OLD build, same size, until
+            # the installer deletes it - counting those read 100% at the start,
+            # measured twice), and full once the target's manifest is the
+            # bundle's own (written last, then verified).
+            # Not before "== installing": until then the bundle is still
+            # being unpacked and the total would be partial.
+            if run and os.path.isdir(STAGE) and any(l.startswith('== installing') for l in lines):
                 t = other(run)
+                since = status.get('started', 0)
                 total = sum(os.path.getsize(os.path.join(STAGE, f)) for f in ('kernel.img', 'SYSTEM', 'dovi.ko')
                             if os.path.exists(os.path.join(STAGE, f)))
-                pos = sum(os.path.getsize(p) for p in (os.path.join(FLASH, 'kernel_%s.img' % t),
-                                                       os.path.join(FLASH, 'SYSTEM_%s' % t),
-                                                       os.path.join(FLASH, 'dovi_%s.ko' % t))
-                          if os.path.exists(p))
-                if os.path.exists(os.path.join(FLASH, 'SLOT_%s.manifest' % t)):
-                    pos = total                 # written and being verified
+                pos = 0
+                for p in (os.path.join(FLASH, 'kernel_%s.img' % t), os.path.join(FLASH, 'SYSTEM_%s' % t),
+                          os.path.join(FLASH, 'dovi_%s.ko' % t)):
+                    try:
+                        st = os.stat(p)
+                    except OSError:
+                        continue
+                    if st.st_mtime >= since:
+                        pos += st.st_size
+                try:
+                    m = os.path.join(FLASH, 'SLOT_%s.manifest' % t)
+                    if os.stat(m).st_mtime >= since and \
+                            open(m, 'rb').read() == open(os.path.join(STAGE, 'MANIFEST'), 'rb').read():
+                        pos = total
+                except OSError:
+                    pass
                 if total:
                     status['progress'] = {'pos': min(pos, total), 'total': total}
         elif status['state'] == 'error':

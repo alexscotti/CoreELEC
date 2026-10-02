@@ -286,6 +286,12 @@ pre.log { background: #f5f5f5; padding: 10px; border-radius: 4px; max-height: 40
 # chunks, the server as the authority on the offset - is written up there.
 PAGE_JS = r"""
 var _cancelled = false;
+// Every button on the page (Install, Revert, Reboot) is off while an upload
+// runs: Install on an earlier upload meanwhile would abort this one.
+function setButtons(on) {
+    document.querySelectorAll('input[type=submit]').forEach(function(e) { e.disabled = !on; });
+    document.getElementById('firmwareFile').disabled = !on;
+}
 function formatBytes(b) {
     if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
     if (b >= 1048576) return (b / 1048576).toFixed(0) + ' MB';
@@ -294,8 +300,7 @@ function formatBytes(b) {
 function cancelUpload() {
     _cancelled = true;
     document.getElementById('uploadProgress').style.display = 'none';
-    document.getElementById('firmwareFile').disabled = false;
-    document.getElementById('firmwareSubmit').disabled = false;
+    setButtons(true);
 }
 function showProgress(status, pct, stats) {
     document.getElementById('uploadProgress').style.display = 'block';
@@ -322,8 +327,7 @@ function startDirectUpload(file) {
     function fail(msg) {
         showProgress('Upload failed', 100, msg);
         document.getElementById('uploadBar').style.background = '#f44336';
-        document.getElementById('firmwareFile').disabled = false;
-        document.getElementById('firmwareSubmit').disabled = false;
+        setButtons(true);
         document.getElementById('uploadCancel').style.display = 'none';
     }
     function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
@@ -338,6 +342,14 @@ function startDirectUpload(file) {
         var samples = [], lastAt = 0, lastT = Date.now(), s;
         try { s = await serverOffset(); }
         catch (e) { fail('Cannot reach the box to check for a partial upload: ' + e); return; }
+        // Already here in full (the same file chosen again): done. Starting
+        // over from 0 would delete the finished upload first, and an Install
+        // pressed meanwhile would find nothing (measured).
+        if (s.complete && s.at === file.size) {
+            showProgress('Already uploaded', 100, formatBytes(file.size) + ' - nothing to send. Reloading...');
+            setTimeout(function() { window.location.reload(); }, 500);
+            return;
+        }
         var off = (s.at > 0 && s.at < file.size) ? s.at : 0;
         if (off > 0) showProgress('Resuming upload...', off / file.size * 100, 'Continuing from ' + formatBytes(off));
         lastAt = off;
@@ -422,8 +434,7 @@ document.getElementById('firmwareForm').addEventListener('submit', function(ev) 
     ev.preventDefault();
     var f = document.getElementById('firmwareFile').files[0];
     if (!f) return;
-    document.getElementById('firmwareFile').disabled = true;
-    document.getElementById('firmwareSubmit').disabled = true;
+    setButtons(false);
     startDirectUpload(f);
 });
 function viewInstallLog() {

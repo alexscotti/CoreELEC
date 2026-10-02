@@ -29,6 +29,8 @@ import json
 import os
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import tarfile
@@ -480,10 +482,15 @@ def render_page(message=''):
              '<title>Host Management - %s</title><style>%s</style></head><body>'
              % (esc(os.uname().nodename), PAGE_CSS))
     h.append('<h1>Host Management</h1>')
+    hosts = other_hosts()
+    if hosts is None:
+        links = '<span style="margin-left: 15px; color: #666;">looking...</span>'
+    elif not hosts:
+        links = '<span style="margin-left: 15px; color: #666;">none found on channel %s</span>' % esc(channel())
+    else:
+        links = ''.join('<a href="%s" style="margin-left: 15px;">%s</a>' % (esc(u), esc(n)) for n, u in hosts)
     h.append('<div style="margin: 15px 0; padding: 10px; background-color: #f8f9fa; border-radius: 4px;">'
-             '<strong>Connect to other hosts:</strong> '
-             '<a href="http://symphony-base-%s.local/host_management" style="margin-left: 15px;">base</a></div>'
-             % esc(channel()))
+             '<strong>Connect to other hosts:</strong>%s</div>' % links)
     if run:
         h.append('<p><strong>Build Version:</strong> %s</p>' % esc(cur['version'] if cur else '(no manifest)'))
     else:
@@ -557,6 +564,110 @@ def render_page(message=''):
                                         'pollInstall();' if install_running else ''))
     h.append('</body></html>')
     return ''.join(h)
+
+
+# ---------------------------------------------------------- other hosts (mDNS)
+# The Pi pages list the other machines from srvloc; the box has no srvloc, so
+# it browses mDNS itself, for the same _symphony<channel>._tcp services srvloc
+# publishes, and lists every host that answers. Not avahi-browse: services
+# with a dot in their name (symphony.relay, player.oppo) are published with
+# the dot unescaped, so avahi parses "symphony" + type "relay._symphony0._tcp"
+# and cannot resolve them - relay, whose only service is dotted, vanished. A
+# raw PTR query reads the SRV records' target hosts whatever the name's labels.
+MDNS_GROUP = ('224.0.0.251', 5353)
+_hosts = {'list': None, 'at': 0}
+
+
+def dns_name(buf, off):
+    """(name, offset after it) at off, following compression pointers."""
+    labels, end, hops = [], None, 0
+    while True:
+        n = buf[off]
+        if n == 0:
+            off += 1
+            break
+        if n & 0xC0 == 0xC0:
+            if end is None:
+                end = off + 2
+            off = ((n & 0x3F) << 8) | buf[off + 1]
+            hops += 1
+            if hops > 32:
+                raise ValueError('compression loop')
+            continue
+        labels.append(buf[off + 1:off + 1 + n].decode('utf-8', 'replace'))
+        off += 1 + n
+    return '.'.join(labels), (end if end is not None else off)
+
+
+def srv_targets(buf, stype):
+    """{target host: set(service names)} from every SRV record under stype in
+    one mDNS response."""
+    out = {}
+    stype = stype.rstrip('.')
+    _, _, qd, an, ns, ar = struct.unpack('>HHHHHH', buf[:12])
+    off = 12
+    for _ in range(qd):
+        _, off = dns_name(buf, off)
+        off += 4
+    for _ in range(an + ns + ar):
+        name, off = dns_name(buf, off)
+        rtype, _, _, rdlen = struct.unpack('>HHIH', buf[off:off + 10])
+        off += 10
+        if rtype == 33 and name.endswith('.' + stype):
+            target, _ = dns_name(buf, off + 6)
+            out.setdefault(target.rstrip('.'), set()).add(name[:-len(stype) - 1])
+        off += rdlen
+    return out
+
+
+def mdns_browse(stype, wait=2.0):
+    """One-shot (legacy unicast) PTR query; responders answer this port."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+    s.bind(('', 0))
+    s.settimeout(0.3)
+    qname = b''.join(bytes([len(p)]) + p.encode() for p in stype.rstrip('.').split('.')) + b'\0'
+    q = struct.pack('>HHHHHH', 0, 0, 1, 0, 0, 0) + qname + struct.pack('>HH', 12, 1)
+    hosts, t0, sent = {}, time.time(), 0
+    try:
+        while time.time() - t0 < wait:
+            if sent < 2 and time.time() - t0 >= sent * 0.7:
+                s.sendto(q, MDNS_GROUP)
+                sent += 1
+            try:
+                buf, _ = s.recvfrom(9000)
+            except socket.timeout:
+                continue
+            try:
+                for h, svcs in srv_targets(buf, stype).items():
+                    hosts.setdefault(h, set()).update(svcs)
+            except (ValueError, IndexError, struct.error):
+                pass            # one malformed answer does not spoil the rest
+    finally:
+        s.close()
+    return hosts
+
+
+def other_hosts():
+    """[(name, url)] from the last browse, or None before the first one."""
+    return _hosts['list']
+
+
+def browse_hosts_forever():
+    me = os.uname().nodename
+    while True:
+        try:
+            found = mdns_browse('_symphony%s._tcp.local.' % channel())
+            lst = []
+            for host in found:
+                m = re.match(r'^symphony-(.+)-\d\.local$', host)
+                if m and host != me + '.local':
+                    lst.append((m.group(1), 'http://%s/' % host))
+            _hosts['list'] = sorted(set(lst))
+            _hosts['at'] = time.time()
+        except OSError as e:
+            log('mdns browse: %s' % e)
+        time.sleep(60)
 
 
 # ----------------------------------------------------------------- the server
@@ -780,6 +891,8 @@ def main():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     srv = ThreadingHTTPServer(('', PORT), Handler)
     srv.daemon_threads = True
+    if not os.environ.get('SYM_NO_MDNS'):
+        threading.Thread(target=browse_hosts_forever, daemon=True).start()
     log('symphony-webui on :%d (flash %s, data %s)' % (PORT, FLASH, DATA))
     srv.serve_forever()
 

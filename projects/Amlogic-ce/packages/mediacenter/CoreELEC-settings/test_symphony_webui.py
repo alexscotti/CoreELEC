@@ -73,7 +73,51 @@ def bundle(installer=STUB, sha=None, drop=None, payload=b'S' * 300000):
     return bio.getvalue()
 
 
+def mdns_parser_tests():
+    """srv_targets on a hand-built response: a dotted instance name
+    (symphony.relay, which avahi cannot resolve), compression pointers, and
+    records of other types and other service types mixed in."""
+    import importlib.machinery
+    import importlib.util
+    import struct
+    loader = importlib.machinery.SourceFileLoader('sw', SERVER)
+    w = importlib.util.module_from_spec(importlib.util.spec_from_loader('sw', loader))
+    loader.exec_module(w)
+
+    def name(n):
+        return b''.join(bytes([len(p)]) + p.encode() for p in n.split('.')) + b'\0'
+    stype = '_symphony0._tcp.local'
+    # question for the type at offset 12; later names point back into it
+    q = name(stype) + struct.pack('>HH', 12, 1)
+    ptr_to_type = struct.pack('>H', 0xC000 | 12)
+    recs = []
+    # SRV for "symphony.relay" - two labels, then a pointer to the type
+    owner = bytes([8]) + b'symphony' + bytes([5]) + b'relay' + ptr_to_type
+    target = name('symphony-relay-0.local')
+    recs.append(owner + struct.pack('>HHIH', 33, 1, 120, 6 + len(target)) + struct.pack('>HHH', 0, 0, 6003) + target)
+    # SRV for "diskmgr" whose target is a compression pointer to "...local" of the question
+    owner2 = bytes([7]) + b'diskmgr' + ptr_to_type
+    target2 = bytes([16]) + b'symphony-disks-0' + struct.pack('>H', 0xC000 | (12 + 1 + 10 + 1 + 4))
+    recs.append(owner2 + struct.pack('>HHIH', 33, 1, 120, 6 + len(target2)) + struct.pack('>HHH', 0, 0, 6001) + target2)
+    # an A record and an SRV of another service type: ignored
+    recs.append(name('symphony-disks-0.local') + struct.pack('>HHIH', 1, 1, 120, 4) + bytes([192, 168, 1, 2]))
+    other = name('x._other._tcp.local')
+    recs.append(other + struct.pack('>HHIH', 33, 1, 120, 6 + len(target)) + struct.pack('>HHH', 0, 0, 1) + target)
+    buf = struct.pack('>HHHHHH', 0, 0x8400, 1, len(recs), 0, 0) + q + b''.join(recs)
+    got = w.srv_targets(buf, stype + '.')
+    check(got.get('symphony-relay-0.local') == {'symphony.relay'}, 'mDNS: dotted instance resolves to its host (%s)' % got)
+    check(got.get('symphony-disks-0.local') == {'diskmgr'}, 'mDNS: compressed target name')
+    check(len(got) == 2, 'mDNS: other types and record kinds ignored')
+    try:
+        loop = struct.pack('>HHHHHH', 0, 0, 0, 1, 0, 0) + struct.pack('>H', 0xC000 | 12)
+        w.srv_targets(loop, stype)
+        check(False, 'mDNS: compression loop rejected')
+    except (ValueError, IndexError, struct.error):
+        check(True, 'mDNS: compression loop rejected')
+
+
 def main():
+    mdns_parser_tests()
     tmp = tempfile.mkdtemp()
     flash = os.path.join(tmp, 'flash')
     data = os.path.join(tmp, 'storage', 'symphony')
@@ -87,7 +131,7 @@ def main():
     rebooted = os.path.join(tmp, 'rebooted')
     port = free_port()
     env = dict(os.environ, SYM_FLASH=flash, SYM_DATA=data, SYM_CMDLINE=cmdline,
-               SYM_PORT=str(port), SYM_REBOOT='touch ' + rebooted)
+               SYM_PORT=str(port), SYM_REBOOT='touch ' + rebooted, SYM_NO_MDNS='1')
     srv = subprocess.Popen([sys.executable, SERVER], env=env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     base = 'http://127.0.0.1:%d' % port

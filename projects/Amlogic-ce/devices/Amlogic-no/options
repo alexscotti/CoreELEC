@@ -147,6 +147,9 @@
     ENTWARE_SUPPORT="yes"
     ENTWARE_ARCH="aarch64-k3.10"
 
+  # Symphony A/B slots: two kernel+SYSTEM pairs (~415M each) on the FAT.
+    SYSTEM_SIZE=1536
+
   # CoreELEC Subdevices
     # Symphony: only the AM9 Pro, which boots the Generic image (scripts/image
     # adds Generic itself). Empty also skips the nine board u-boots and images.

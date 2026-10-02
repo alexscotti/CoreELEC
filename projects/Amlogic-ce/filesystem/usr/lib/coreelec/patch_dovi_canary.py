@@ -54,6 +54,18 @@ KNOWN_KERNELS = {
 SEARCH = ['/storage/.config/dovi.ko', '/flash/dovi.ko', '/storage/dovi.ko']
 INSTALL = '/storage/.config/dovi.ko'
 
+# A/B slot stick: the booted slot's module (/flash/dovi_A.ko or _B) is searched
+# first by the loader, so an install to INSTALL would never be loaded.
+SLOT_KO = None
+try:
+    for _a in open('/proc/cmdline').read().split():
+        if _a.startswith('SYSTEM_IMAGE=') and _a[-8:-1] == 'SYSTEM_' and _a[-1] in 'AB':
+            SLOT_KO = '/flash/dovi_%s.ko' % _a[-1]
+except OSError:
+    pass
+if SLOT_KO:
+    SEARCH.insert(0, SLOT_KO)
+
 MRS_SP_EL0 = 0xD5384100          # mrs xN, SP_EL0        (mask 0xFFFFFFE0)
 LDR_UIMM   = 0xF9400000          # ldr xT,[xN,#imm12*8]  (mask 0xFFC00000)
 
@@ -256,6 +268,11 @@ def main():
         print('--dry-run: nothing written.')
         return
 
+    if SLOT_KO and not a.dst:
+        sys.exit('REFUSING: this is an A/B slot stick; %s is loaded first, so an install\n'
+                 'to %s would never be used. dovi-canary-fix already corrects the\n'
+                 'module in RAM at every boot. Pass --out to write a copy somewhere.'
+                 % (SLOT_KO, INSTALL))
     dst = a.dst or INSTALL
     if dst == INSTALL:
         keep = INSTALL + '.bak' if os.path.isfile(INSTALL) else \

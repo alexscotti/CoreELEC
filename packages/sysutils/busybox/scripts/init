@@ -785,6 +785,17 @@ check_update() {
     return 0
   fi
 
+  # Symphony A/B slot stick (cfgload passes SYSTEM_IMAGE=SYSTEM_A|B): an
+  # in-place update would overwrite the RUNNING slot and replace cfgload with
+  # the update's own, which may not know about slots. Slots are installed
+  # from the Mac (tools/coreelec-build/am9usb install) instead.
+  if [ "$IMAGE_SYSTEM" != "SYSTEM" ]; then
+    echo "Updating in place is disabled on an A/B slot stick ($IMAGE_SYSTEM)"
+    do_cleanup
+    StartProgress countdown "Normal startup in 10s... " 10 "NOW"
+    return 0
+  fi
+
   if [ -d $UPDATE_DIR/.tmp ]; then
     echo "Failed update detected - performing recovery."
     echo ""

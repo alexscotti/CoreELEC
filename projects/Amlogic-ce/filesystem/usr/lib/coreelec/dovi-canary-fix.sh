@@ -28,9 +28,15 @@ rm -f "$TMP"
 [ -x /usr/bin/python3 ] || { log "python3 unavailable - leaving module untouched"; exit 0; }
 [ -f "$PATCHER" ]       || { log "patcher not found at $PATCHER - leaving module untouched"; exit 0; }
 
+# A/B slot stick: the booted slot's own module (/flash/dovi_A.ko or _B) first
+DOVI_KO_SLOT=""
+for a in $(cat /proc/cmdline); do
+  case "$a" in SYSTEM_IMAGE=*SYSTEM_[AB]) DOVI_KO_SLOT="/flash/dovi_${a##*_}.ko" ;; esac
+done
+
 # same search order as /usr/lib/coreelec/dovi-loader
 SRC=""
-for c in /storage/.config/dovi.ko /flash/dovi.ko /storage/dovi.ko; do
+for c in $DOVI_KO_SLOT /storage/.config/dovi.ko /flash/dovi.ko /storage/dovi.ko; do
     if [ -f "$c" ]; then SRC="$c"; break; fi
 done
 [ -n "$SRC" ] || { log "no local dovi.ko (loader will use the Android partition) - nothing to do"; exit 0; }

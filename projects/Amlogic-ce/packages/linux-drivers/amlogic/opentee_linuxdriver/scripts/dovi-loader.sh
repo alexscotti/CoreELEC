@@ -55,8 +55,15 @@ EOF
 }
 
 load_dovi() {
+  # A/B slot stick: the booted slot's own module (/flash/dovi_A.ko or _B) first
+  DOVI_KO_SLOT=""
+  for a in $(cat /proc/cmdline); do
+    case "$a" in SYSTEM_IMAGE=*SYSTEM_[AB]) DOVI_KO_SLOT="/flash/dovi_${a##*_}.ko" ;; esac
+  done
+
   # local dovi.ko
-  for DOVI_KO_STORAGE in /storage/.config/dovi.ko \
+  for DOVI_KO_STORAGE in ${DOVI_KO_SLOT} \
+                         /storage/.config/dovi.ko \
                          /flash/dovi.ko \
                          /storage/dovi.ko \
                          ; do

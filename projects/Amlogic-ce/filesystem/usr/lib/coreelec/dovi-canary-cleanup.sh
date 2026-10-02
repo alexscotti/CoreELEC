@@ -34,7 +34,12 @@ SRC=""
 # Marker missing (older fix script, or /run cleared): fall back to the loader's
 # search order and take whichever path is currently a tmpfs mountpoint.
 if [ -z "$SRC" ]; then
-    for c in /storage/.config/dovi.ko /flash/dovi.ko /storage/dovi.ko; do
+    # A/B slot stick: the booted slot's own module (/flash/dovi_A.ko or _B) first
+    DOVI_KO_SLOT=""
+    for a in $(cat /proc/cmdline); do
+      case "$a" in SYSTEM_IMAGE=*SYSTEM_[AB]) DOVI_KO_SLOT="/flash/dovi_${a##*_}.ko" ;; esac
+    done
+    for c in $DOVI_KO_SLOT /storage/.config/dovi.ko /flash/dovi.ko /storage/dovi.ko; do
         if grep -q " ${c} tmpfs " /proc/mounts 2>/dev/null; then SRC="$c"; break; fi
     done
 fi

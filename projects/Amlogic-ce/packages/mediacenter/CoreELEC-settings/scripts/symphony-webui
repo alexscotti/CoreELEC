@@ -1,0 +1,754 @@
+#!/usr/bin/python3
+# symphony-webui - Host Management for the Symphony CoreELEC box, on port 80.
+#
+# The box runs an A/B slot stick (see theater tools/coreelec-build/README.md):
+# two kernel+SYSTEM pairs on the boot FAT, slot.ini picking which one boots.
+# This page does what the Pi webui's Host Management page does for a Pi:
+# upload a firmware image in chunks, install it into the slot that is NOT
+# running, reboot into it, or go back to the other slot.
+#
+# A firmware image here is a slot bundle, coreelec_<date>_<version>_aarch64_slot.tar:
+# kernel.img, SYSTEM, dovi.ko, MANIFEST and am9slot.sh, the installer that
+# goes with it. Installing runs THAT installer (its sha256 is in the MANIFEST),
+# so the installer always matches what it installs; it leaves a copy of itself
+# at /flash/am9slot.sh, which goback uses.
+#
+# The upload protocol is the Pi webui's, so the page script is the same:
+#   POST /firmware_chunk         X-Filename, X-Offset, X-Total; raw body
+#   GET  /firmware_chunk_status  ?filename=  -> received, complete, chunk_size
+#   GET  /firmware_install_status            -> state, step, detail, progress
+#
+# Python standard library only: no Flask, no Jinja2 on the box.
+#
+# Every URL the page uses is RELATIVE: base's webui reaches this page through
+# /proxy/symphony-coreelec-<ch>.local/ when it is itself reached over a tunnel,
+# and an absolute /firmware_chunk would land on base, not here.
+import hashlib
+import html
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+# Overridable for the tests (test_symphony_webui.py); the defaults are the box.
+FLASH = os.environ.get('SYM_FLASH', '/flash')
+DATA = os.environ.get('SYM_DATA', '/storage/.cache/symphony')
+CMDLINE = os.environ.get('SYM_CMDLINE', '/proc/cmdline')
+PORT = int(os.environ.get('SYM_PORT', '80'))
+REBOOT_CMD = os.environ.get('SYM_REBOOT', 'systemctl reboot').split()
+
+UPLOAD_DIR = os.path.join(DATA, 'upload')
+STAGE = os.path.join(DATA, 'webstage')
+UPLOAD_FINAL = os.path.join(UPLOAD_DIR, 'firmware_slot.tar')
+UPLOAD_NAME = os.path.join(UPLOAD_DIR, 'firmware_slot.name')
+UPLOAD_META = os.path.join(UPLOAD_DIR, 'upload.meta')
+INSTALL_STATUS = os.path.join(DATA, 'install.status')
+INSTALL_LOG = os.path.join(DATA, 'install.log')
+
+# 8MB: the Pi webui's figure, chosen because Safari stops delivering the
+# response to the page after a 32MB request body.
+CHUNK_SIZE = 8 * 1024 * 1024
+NAME_RE = re.compile(r'^coreelec_[0-9]+_([0-9a-f]{40}|current-[0-9]+)_aarch64_slot\.tar$')
+BUNDLE_FILES = ('MANIFEST', 'kernel.img', 'SYSTEM', 'dovi.ko', 'am9slot.sh')
+
+_lock = threading.Lock()          # one install/goback at a time
+_install_thread = None
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+# ------------------------------------------------------------------ slot state
+def read_kv(path):
+    out = {}
+    try:
+        with open(path, errors='replace') as f:
+            for line in f:
+                k, sep, v = line.rstrip('\n').partition('=')
+                if sep and k not in out:
+                    out[k] = v
+    except OSError:
+        pass
+    return out
+
+
+def running_slot():
+    try:
+        words = open(CMDLINE).read().split()
+    except OSError:
+        return None
+    slot = None
+    for w in words:
+        m = re.match(r'^SYSTEM_IMAGE=/?SYSTEM_([AB])$', w)
+        if m:
+            slot = m.group(1)
+    return slot
+
+
+def selected_slot():
+    s = read_kv(os.path.join(FLASH, 'slot.ini')).get('ceslot', '').strip()
+    return 'B' if s == 'B' else 'A'
+
+
+def other(slot):
+    return 'B' if slot == 'A' else 'A'
+
+
+def slot_info(slot):
+    m = read_kv(os.path.join(FLASH, 'SLOT_%s.manifest' % slot))
+    if not m:
+        return None
+    return {'version': m.get('SYMPHONY_VERSION', ''),
+            'build_id': m.get('BUILD_ID', ''),
+            'coreelec': m.get('COREELEC_VERSION', '')}
+
+
+def os_release():
+    return read_kv('/etc/os-release')
+
+
+def free_bytes(path):
+    try:
+        st = os.statvfs(path)
+        return st.f_bavail * st.f_frsize
+    except OSError:
+        return 0
+
+
+def fmt_bytes(b):
+    if b >= 1 << 30:
+        return '%.1f GB' % (b / float(1 << 30))
+    if b >= 1 << 20:
+        return '%.0f MB' % (b / float(1 << 20))
+    return '%.0f KB' % (b / 1024.0)
+
+
+def uploaded():
+    """(filename, version) of a complete upload, or (None, None)."""
+    if not os.path.exists(UPLOAD_FINAL):
+        return None, None
+    try:
+        name = open(UPLOAD_NAME).read().strip()
+    except OSError:
+        name = ''
+    m = NAME_RE.match(name)
+    return (name or 'firmware_slot.tar'), (m.group(1) if m else '')
+
+
+# --------------------------------------------------------------- install state
+def write_status(status):
+    tmp = INSTALL_STATUS + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(status, f)
+    os.replace(tmp, INSTALL_STATUS)
+
+
+def read_status():
+    try:
+        with open(INSTALL_STATUS) as f:
+            status = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if status.get('state') == 'running' and not (_install_thread and _install_thread.is_alive()):
+        # This process restarted mid-install: nothing is waiting on it.
+        status.update(state='error', error='The install was interrupted (the web server restarted). '
+                                           'See the install log; the box still boots the slot it ran.')
+    return status
+
+
+def log_lines():
+    try:
+        with open(INSTALL_LOG, errors='replace') as f:
+            return [l.rstrip('\n') for l in f]
+    except OSError:
+        return []
+
+
+def run_install(name, version):
+    """Background: unpack the upload, check its installer, run it."""
+    status = {'state': 'running', 'kind': 'install', 'version': version,
+              'started': time.time()}
+    write_status(status)
+    logf = open(INSTALL_LOG, 'w')
+
+    def say(msg):
+        logf.write(msg + '\n')
+        logf.flush()
+
+    rc = 1
+    try:
+        say('== unpacking %s' % name)
+        shutil.rmtree(STAGE, ignore_errors=True)
+        os.makedirs(STAGE)
+        with tarfile.open(UPLOAD_FINAL) as tf:
+            members = tf.getmembers()
+            names = sorted(m.name for m in members)
+            missing = [f for f in BUNDLE_FILES if f not in names]
+            extra = [n for n in names if n not in BUNDLE_FILES]
+            if missing or extra or not all(m.isfile() for m in members):
+                raise RuntimeError('not a slot bundle (missing %s, unexpected %s)' % (missing, extra))
+            for m in members:
+                tf.extract(m, STAGE, filter='data')
+        man = read_kv(os.path.join(STAGE, 'MANIFEST'))
+        want = man.get('am9slot_sha256', '')
+        got = hashlib.sha256(open(os.path.join(STAGE, 'am9slot.sh'), 'rb').read()).hexdigest()
+        if not want or want != got:
+            raise RuntimeError('the bundle installer does not match its MANIFEST (am9slot_sha256)')
+        say('== running the bundle installer')
+        proc = subprocess.Popen(['sh', os.path.join(STAGE, 'am9slot.sh'), 'install', STAGE],
+                                stdout=logf, stderr=subprocess.STDOUT)
+        status['pid'] = proc.pid
+        write_status(status)
+        rc = proc.wait()
+    except Exception as e:      # noqa: BLE001 - reported to the page
+        say('am9slot: %s' % e)
+        rc = 1
+    finally:
+        shutil.rmtree(STAGE, ignore_errors=True)
+    status.update(rc=rc, finished=time.time())
+    if rc == 0:
+        for p in (UPLOAD_FINAL, UPLOAD_NAME):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        status.update(state='done')
+    else:
+        errs = [l for l in log_lines() if l.startswith('am9slot:')]
+        status.update(state='error', error=(errs[-1] if errs else 'Install failed.'))
+    logf.close()
+    write_status(status)
+    log('install %s: rc=%d' % (name, rc))
+
+
+def start_install():
+    global _install_thread
+    with _lock:
+        cur = read_status()
+        if cur and cur.get('state') == 'running':
+            return 'An install is already running.'
+        name, version = uploaded()
+        if not name:
+            return 'Error: no firmware uploaded.'
+        if not running_slot():
+            return 'Error: this stick has no A/B slots.'
+        _install_thread = threading.Thread(target=run_install, args=(name, version), daemon=True)
+        _install_thread.start()
+    return None
+
+
+def goback():
+    script = os.path.join(FLASH, 'am9slot.sh')
+    if not os.path.exists(script):
+        return ('Error: no installer on this stick yet (/flash/am9slot.sh). '
+                'It arrives with the first install from this page or am9usb.')
+    with _lock:
+        cur = read_status()
+        if cur and cur.get('state') == 'running':
+            return 'Error: an install is running.'
+        p = subprocess.run(['sh', script, 'goback'], capture_output=True, text=True, timeout=600)
+    out = (p.stdout + p.stderr).strip()
+    return out if p.returncode == 0 else 'Error: ' + out
+
+
+def reboot_soon():
+    def go():
+        time.sleep(1)
+        subprocess.call(REBOOT_CMD)
+    threading.Thread(target=go, daemon=True).start()
+
+
+# -------------------------------------------------------------------- the page
+PAGE_CSS = """
+body { font-family: Arial, sans-serif; padding: 10px; margin: 0; }
+button, input[type=submit] { padding: 8px 16px; font-size: 14px; margin: 5px 5px 5px 0;
+  background-color: #f4f4f4; border: 1px solid #ccc; cursor: pointer; }
+button:hover, input[type=submit]:hover { background-color: #e0e0e0; }
+table.slots { border-collapse: collapse; margin: 8px 0; }
+table.slots td, table.slots th { border: 1px solid #ccc; padding: 4px 10px; text-align: left; }
+table.slots tr.running td { font-weight: bold; }
+pre.log { background: #f5f5f5; padding: 10px; border-radius: 4px; max-height: 400px;
+  overflow-y: auto; font-size: 12px; white-space: pre-wrap; }
+@keyframes pulse { 0% { background-position: 0% 0; } 100% { background-position: 200% 0; } }
+"""
+
+# The Pi webui's chunked uploader and install poller (common/webui/templates/
+# host_management.html), minus the SSH-tunnel paths the box does not have.
+# Why it is shaped this way - a linear async loop, ArrayBuffer bodies, 8MB
+# chunks, the server as the authority on the offset - is written up there.
+PAGE_JS = r"""
+var _cancelled = false;
+function formatBytes(b) {
+    if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
+    if (b >= 1048576) return (b / 1048576).toFixed(0) + ' MB';
+    return (b / 1024).toFixed(0) + ' KB';
+}
+function cancelUpload() {
+    _cancelled = true;
+    document.getElementById('uploadProgress').style.display = 'none';
+    document.getElementById('firmwareFile').disabled = false;
+    document.getElementById('firmwareSubmit').disabled = false;
+}
+function showProgress(status, pct, stats) {
+    document.getElementById('uploadProgress').style.display = 'block';
+    document.getElementById('uploadStatus').textContent = status;
+    var bar = document.getElementById('uploadBar');
+    if (pct < 0) {
+        bar.style.width = '100%';
+        bar.style.background = 'repeating-linear-gradient(90deg, #4CAF50 0%, #81C784 50%, #4CAF50 100%)';
+        bar.style.backgroundSize = '200% 100%';
+        bar.style.animation = 'pulse 1.5s linear infinite';
+    } else {
+        bar.style.width = pct + '%';
+        bar.style.background = '#4CAF50';
+        bar.style.animation = '';
+    }
+    document.getElementById('uploadStats').textContent = stats || '';
+}
+function startDirectUpload(file) {
+    var CHUNK = CHUNK_SIZE_FROM_SERVER;
+    var MAX_RETRIES = 6, RETRY_DELAY_MS = 2000;
+    showProgress('Preparing upload...', 0, 'Checking for a partial upload...');
+    document.getElementById('uploadCancel').style.display = '';
+    _cancelled = false;
+    function fail(msg) {
+        showProgress('Upload failed', 100, msg);
+        document.getElementById('uploadBar').style.background = '#f44336';
+        document.getElementById('firmwareFile').disabled = false;
+        document.getElementById('firmwareSubmit').disabled = false;
+        document.getElementById('uploadCancel').style.display = 'none';
+    }
+    function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+    async function serverOffset() {
+        var r = await fetch('firmware_chunk_status?filename=' + encodeURIComponent(file.name) +
+                            '&t=' + Date.now(), {cache: 'no-store'});
+        if (!r.ok) return {at: 0, complete: false};
+        var j = await r.json();
+        return {at: (typeof j.received === 'number' ? j.received : 0), complete: !!j.complete};
+    }
+    async function run() {
+        var samples = [], lastAt = 0, lastT = Date.now(), s;
+        try { s = await serverOffset(); }
+        catch (e) { fail('Cannot reach the box to check for a partial upload: ' + e); return; }
+        var off = (s.at > 0 && s.at < file.size) ? s.at : 0;
+        if (off > 0) showProgress('Resuming upload...', off / file.size * 100, 'Continuing from ' + formatBytes(off));
+        lastAt = off;
+        var retries = 0;
+        while (off < file.size) {
+            if (_cancelled) { fail('Cancelled'); return; }
+            var end = Math.min(off + CHUNK, file.size), resp, text, body = null;
+            try {
+                var buf = await file.slice(off, end).arrayBuffer();
+                resp = await fetch('firmware_chunk', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/octet-stream', 'X-Filename': file.name,
+                              'X-Offset': String(off), 'X-Total': String(file.size)},
+                    body: buf, cache: 'no-store'});
+                text = await resp.text();
+                try { body = JSON.parse(text); } catch (ex) { body = null; }
+            } catch (e) {
+                retries++;
+                if (retries > MAX_RETRIES) { fail('Upload failed after ' + MAX_RETRIES + ' retries at ' + formatBytes(off) + ': ' + e); return; }
+                showProgress('Reconnecting...', off / file.size * 100, 'Retry ' + retries + '/' + MAX_RETRIES + ' at ' + formatBytes(off));
+                await sleep(RETRY_DELAY_MS);
+                try { var s2 = await serverOffset(); if (s2.complete) break; if (s2.at > 0) off = s2.at; } catch (e2) {}
+                continue;
+            }
+            if (resp.status === 409 && body && typeof body.expected_offset === 'number') { off = body.expected_offset; continue; }
+            if (!resp.ok || !body || !body.success) {
+                fail('HTTP ' + resp.status + (body && body.error ? ': ' + body.error : '') + ' at ' + formatBytes(off));
+                return;
+            }
+            retries = 0;
+            off = body.received;
+            var now = Date.now(), dt = (now - lastT) / 1000;
+            if (dt > 0 && off > lastAt) { samples.push((off - lastAt) / dt); if (samples.length > 5) samples.shift(); lastAt = off; lastT = now; }
+            var avg = samples.length ? samples.reduce(function(a, b) { return a + b; }, 0) / samples.length : 0;
+            var stats = formatBytes(off) + ' / ' + formatBytes(file.size);
+            if (avg > 0) { var rem = (file.size - off) / avg; stats += ' - ' + formatBytes(avg) + '/s, ~' + (rem > 60 ? Math.round(rem / 60) + ' min' : Math.round(rem) + ' sec') + ' remaining'; }
+            showProgress('Uploading firmware...', off / file.size * 100, stats);
+            if (body.done) break;
+        }
+        showProgress('Upload complete!', 100, 'Reloading...');
+        setTimeout(function() { window.location.reload(); }, 500);
+    }
+    run().catch(function(e) { fail('Upload error: ' + e); });
+}
+function pollInstall() {
+    document.getElementById('firmwareFile').disabled = true;
+    document.getElementById('firmwareSubmit').disabled = true;
+    document.getElementById('uploadCancel').style.display = 'none';
+    showProgress('Installing firmware...', -1, '');
+    function tick() {
+        fetch('firmware_install_status', {cache: 'no-store'})
+        .then(function(r) { return r.json(); })
+        .then(function(s) {
+            var what = 'Installing firmware ' + (s.version || '');
+            if (s.state === 'done') { showProgress(what + ': complete', 100, 'Reloading...'); setTimeout(function() { window.location.reload(); }, 1000); return; }
+            if (s.state === 'error') {
+                showProgress(what + ': FAILED', 100, (s.error || 'Install failed') + (s.log_tail ? '\n\nInstall log:\n' + s.log_tail : ''));
+                document.getElementById('uploadBar').style.background = '#f44336';
+                document.getElementById('uploadStats').style.whiteSpace = 'pre-wrap';
+                document.getElementById('firmwareFile').disabled = false;
+                document.getElementById('firmwareSubmit').disabled = false;
+                return;
+            }
+            if (s.state !== 'running') { window.location.reload(); return; }
+            var secs = Math.round(Date.now() / 1000 - s.started);
+            var elapsed = Math.floor(secs / 60) + ':' + ('0' + secs % 60).slice(-2);
+            var title = what + (s.step ? ' - ' + s.step : '');
+            var stats = (s.detail || '') + ' (' + elapsed + ' elapsed)';
+            if (s.progress && s.progress.total > 0) {
+                showProgress(title, s.progress.pos / s.progress.total * 100,
+                             formatBytes(s.progress.pos) + ' / ' + formatBytes(s.progress.total) + ' written to the slot - ' + stats);
+            } else {
+                showProgress(title, -1, stats);
+            }
+            setTimeout(tick, 2000);
+        })
+        .catch(function(e) { showProgress('Installing firmware...', -1, 'Waiting for status: ' + e); setTimeout(tick, 5000); });
+    }
+    tick();
+}
+document.getElementById('firmwareForm').addEventListener('submit', function(ev) {
+    ev.preventDefault();
+    var f = document.getElementById('firmwareFile').files[0];
+    if (!f) return;
+    document.getElementById('firmwareFile').disabled = true;
+    document.getElementById('firmwareSubmit').disabled = true;
+    startDirectUpload(f);
+});
+function viewInstallLog() {
+    fetch('install_log', {cache: 'no-store'}).then(function(r) { return r.text(); }).then(function(t) {
+        var el = document.getElementById('installLog');
+        el.textContent = t || '(empty)';
+        el.style.display = 'block';
+    });
+}
+"""
+
+
+def esc(s):
+    return html.escape(str(s or ''), quote=True)
+
+
+def channel():
+    m = re.match(r'^symphony-coreelec-(\d)$', os.uname().nodename)
+    return m.group(1) if m else '0'
+
+
+def render_page(message=''):
+    rel = os_release()
+    run = running_slot()
+    sel = selected_slot()
+    status = read_status()
+    install_running = bool(status and status.get('state') == 'running')
+    up_name, up_version = uploaded()
+    slots = {s: slot_info(s) for s in 'AB'}
+    cur = slots.get(run) if run else None
+    oth = slots.get(other(run)) if run else None
+    pending = run and sel != run
+    try:
+        uptime = float(open('/proc/uptime').read().split()[0])
+        uptime_s = '%dd %dh %dm' % (uptime // 86400, uptime % 86400 // 3600, uptime % 3600 // 60)
+    except (OSError, ValueError, IndexError):
+        uptime_s = '?'
+
+    h = []
+    h.append('<!doctype html><html lang="en"><head><meta charset="UTF-8">'
+             '<meta name="viewport" content="width=device-width, initial-scale=1">'
+             '<title>Host Management - %s</title><style>%s</style></head><body>'
+             % (esc(os.uname().nodename), PAGE_CSS))
+    h.append('<h1>Host Management</h1>')
+    h.append('<div style="margin: 15px 0; padding: 10px; background-color: #f8f9fa; border-radius: 4px;">'
+             '<strong>Connect to other hosts:</strong> '
+             '<a href="http://symphony-base-%s.local/host_management" style="margin-left: 15px;">base</a></div>'
+             % esc(channel()))
+    if run:
+        h.append('<p><strong>Build Version:</strong> %s</p>' % esc(cur['version'] if cur else '(no manifest)'))
+    else:
+        h.append('<p><strong>Build Version:</strong> (stick without A/B slots)</p>')
+    h.append('<p><strong>CoreELEC:</strong> %s &nbsp; <strong>Fork commit:</strong> %s</p>'
+             % (esc(rel.get('VERSION', '').strip('"')), esc(rel.get('BUILD_ID', '').strip('"')[:12])))
+    h.append('<p><strong>Uptime:</strong> %s | <strong>Free (/flash):</strong> %s | '
+             '<strong>Free (/storage):</strong> %s</p>'
+             % (uptime_s, fmt_bytes(free_bytes(FLASH)), fmt_bytes(free_bytes(os.path.dirname(DATA.rstrip('/')) or '/'))))
+    if message:
+        if message.startswith('Error'):
+            h.append('<pre style="color: red; white-space: pre-wrap; background: #fff0f0; padding: 10px; '
+                     'border-radius: 4px;">%s</pre>' % esc(message))
+        else:
+            h.append('<p style="color: green;"><strong>%s</strong></p>' % esc(message))
+    h.append('<hr><p><strong>Firmware Management:</strong></p>')
+    if run:
+        h.append('<p><strong>Running slot:</strong> %s%s</p>'
+                 % (run, ' &nbsp; <span style="color: orange;">(slot %s selected for the next boot)</span>' % sel
+                    if pending else ''))
+        h.append('<table class="slots"><tr><th>Slot</th><th>Version</th><th>CoreELEC</th><th>Fork commit</th></tr>')
+        for s in 'AB':
+            i = slots[s]
+            h.append('<tr%s><td>%s%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+                     % (' class="running"' if s == run else '', s, ' (running)' if s == run else '',
+                        esc(i['version']) if i else '<em>empty</em>', esc(i['coreelec']) if i else '',
+                        esc(i['build_id'][:12]) if i else ''))
+        h.append('</table>')
+    h.append('<p style="color: #666; font-size: 0.9em; margin: 10px 0;">Expected filename pattern: '
+             '<strong>coreelec_*_aarch64_slot.tar</strong></p>')
+    h.append('<form id="firmwareForm"><input type="file" id="firmwareFile" name="file" accept=".tar" required> '
+             '<input type="submit" id="firmwareSubmit" value="Upload Firmware"></form>')
+    h.append('<div id="uploadProgress" style="display:none; margin: 15px 0; padding: 12px; background: #f5f5f5; border-radius: 4px;">'
+             '<div id="uploadStatus" style="margin-bottom: 8px; font-weight: bold;">Uploading firmware...</div>'
+             '<div style="background: #ddd; border-radius: 3px; height: 20px; overflow: hidden;">'
+             '<div id="uploadBar" style="background: #4CAF50; height: 100%; width: 0%; transition: width 0.3s;"></div></div>'
+             '<div id="uploadStats" style="margin-top: 6px; font-size: 0.9em; color: #666;"></div>'
+             '<button id="uploadCancel" onclick="cancelUpload()">Cancel</button></div>')
+
+    if pending:
+        tgt = slots.get(sel)
+        h.append('<p style="color: orange;">Version <strong>%s</strong> will be executed on reboot</p>'
+                 % esc(tgt['version'] if tgt else '?'))
+    if not install_running and run:
+        if up_name:
+            h.append('<p style="color: green;">Firmware file ready for installation: %s</p>' % esc(up_name))
+            h.append('<form method="POST" action="host_management"><input type="hidden" name="action" value="update_firmware">'
+                     '<input type="submit" value="Install Firmware %s" onclick="return confirm(%s)"></form>'
+                     % (esc(up_version), esc(json.dumps('Install firmware %s into slot %s? Kodi must not be playing.'
+                                                         % (up_version, other(run))))))
+        elif not pending:
+            h.append('<p style="color: #666;">No firmware file uploaded</p>')
+        if pending:
+            h.append('<form method="POST" action="host_management"><input type="hidden" name="action" value="revert_firmware">'
+                     '<input type="submit" value="Cancel pending update (stay on %s)" onclick="return confirm(%s)"></form>'
+                     % (esc(cur['version'] if cur else run),
+                        esc(json.dumps('Cancel the pending update and stay on the current version?'))))
+        elif oth:
+            h.append('<form method="POST" action="host_management"><input type="hidden" name="action" value="revert_firmware">'
+                     '<input type="submit" value="Revert to version %s" onclick="return confirm(%s)"></form>'
+                     % (esc(oth['version']), esc(json.dumps('Revert to version %s? It runs after a reboot.' % oth['version']))))
+    if os.path.exists(INSTALL_LOG):
+        h.append('<div style="margin-top: 15px;"><button type="button" onclick="viewInstallLog()">View Install Log</button></div>'
+                 '<pre id="installLog" class="log" style="display:none"></pre>')
+    tgt = slots.get(sel) if pending else None
+    h.append('<div style="margin-top: 15px;"><form method="POST" action="host_management">'
+             '<input type="hidden" name="action" value="reboot"><input type="submit" value="%s" onclick="return confirm(%s)"></form></div>'
+             % (esc('Reboot System to %s' % tgt['version'] if tgt else 'Reboot System'),
+                esc(json.dumps('Reboot the box now?'))))
+    h.append('<script>%s%s</script>' % (PAGE_JS.replace('CHUNK_SIZE_FROM_SERVER', str(CHUNK_SIZE)),
+                                        'pollInstall();' if install_running else ''))
+    h.append('</body></html>')
+    return ''.join(h)
+
+
+# ----------------------------------------------------------------- the server
+class Handler(BaseHTTPRequestHandler):
+    server_version = 'symphony-webui'
+    protocol_version = 'HTTP/1.1'
+
+    def log_message(self, fmt, *args):
+        if '/firmware_install_status' not in (args[0] if args else ''):
+            log('%s %s' % (self.address_string(), fmt % args))
+
+    def send(self, code, body, ctype='text/html; charset=utf-8', headers=None):
+        data = body.encode('utf-8') if isinstance(body, str) else body
+        self.send_response(code)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(data)))
+        # no-store: the uploader lives in the page, and a cached page keeps
+        # running an old uploader against a new server (see the Pi webui).
+        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def json(self, code, obj):
+        self.send(code, json.dumps(obj), 'application/json')
+
+    def redirect(self, where):
+        self.send(303, '', headers={'Location': where})
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        q = parse_qs(u.query)
+        if u.path in ('/', '/index.html'):
+            return self.redirect('host_management')
+        if u.path == '/host_management':
+            msg = q.get('msg', [''])[0]
+            return self.send(200, render_page(msg))
+        if u.path == '/firmware_chunk_status':
+            return self.chunk_status(q.get('filename', [''])[0])
+        if u.path == '/firmware_install_status':
+            return self.install_status()
+        if u.path == '/install_log':
+            return self.send(200, '\n'.join(log_lines()), 'text/plain; charset=utf-8')
+        if u.path == '/status.json':
+            return self.json(200, {'running': running_slot(), 'selected': selected_slot(),
+                                   'slots': {s: slot_info(s) for s in 'AB'}})
+        self.send(404, 'not found', 'text/plain')
+
+    def do_POST(self):
+        u = urlparse(self.path)
+        if u.path == '/firmware_chunk':
+            return self.chunk()
+        if u.path == '/host_management':
+            n = int(self.headers.get('Content-Length') or 0)
+            form = parse_qs(self.rfile.read(n).decode('utf-8', 'replace'))
+            action = form.get('action', [''])[0]
+            msg = ''
+            if action == 'update_firmware':
+                msg = start_install() or ''
+            elif action == 'revert_firmware':
+                msg = goback()
+            elif action == 'reboot':
+                reboot_soon()
+                msg = 'System is rebooting now.'
+            else:
+                msg = 'Error: unknown action'
+            return self.redirect('host_management' + ('?msg=' + _q(msg) if msg else ''))
+        self.send(404, 'not found', 'text/plain')
+
+    # --- chunked upload (the Pi webui's protocol) ---
+    def chunk_status(self, filename):
+        if not NAME_RE.match(filename):
+            return self.json(200, {'received': 0})
+        part = part_path(filename)
+        name, _ = uploaded()
+        if name == filename:
+            return self.json(200, {'received': os.path.getsize(UPLOAD_FINAL), 'complete': True})
+        have = os.path.getsize(part) if os.path.exists(part) else 0
+        return self.json(200, {'received': have, 'complete': False, 'chunk_size': CHUNK_SIZE})
+
+    def chunk(self):
+        filename = self.headers.get('X-Filename', '')
+        n = int(self.headers.get('Content-Length') or 0)
+        if not NAME_RE.match(filename):
+            self.rfile.read(n)
+            return self.json(400, {'success': False,
+                                   'error': 'Filename must match coreelec_<date>_<version>_aarch64_slot.tar'})
+        try:
+            offset = int(self.headers.get('X-Offset', ''))
+            total = int(self.headers.get('X-Total', ''))
+        except ValueError:
+            self.rfile.read(n)
+            return self.json(400, {'success': False, 'error': 'Bad X-Offset/X-Total'})
+        if offset < 0 or total <= 0 or offset > total:
+            self.rfile.read(n)
+            return self.json(400, {'success': False, 'error': 'Bad offset/total'})
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        part = part_path(filename)
+        if offset == 0:
+            # A retried first chunk of the SAME upload must not restart it
+            # (the Pi webui lost a 4MB-in upload that way); only a different
+            # upload clears what is here.
+            prior = None
+            try:
+                prior = json.load(open(UPLOAD_META))
+            except (OSError, ValueError):
+                pass
+            same = bool(prior and prior.get('filename') == filename and prior.get('total') == total
+                        and os.path.exists(part) and os.path.getsize(part) > 0)
+            if not same:
+                for f in os.listdir(UPLOAD_DIR):
+                    try:
+                        os.remove(os.path.join(UPLOAD_DIR, f))
+                    except OSError:
+                        pass
+                json.dump({'filename': filename, 'total': total}, open(UPLOAD_META, 'w'))
+            free = free_bytes(UPLOAD_DIR) + (os.path.getsize(part) if os.path.exists(part) else 0)
+            if free < total + CHUNK_SIZE:
+                self.rfile.read(n)
+                return self.json(507, {'success': False, 'error': 'Insufficient space on /storage: image %s, free %s'
+                                       % (fmt_bytes(total), fmt_bytes(free))})
+            log('upload starting: %s (%s)' % (filename, fmt_bytes(total)))
+        have = os.path.getsize(part) if os.path.exists(part) else 0
+        if have != offset:
+            self.rfile.read(n)
+            return self.json(409, {'success': False, 'error': 'Offset mismatch', 'expected_offset': have})
+        if n <= 0:
+            return self.json(400, {'success': False, 'error': 'Empty chunk'})
+        try:
+            with open(part, 'ab') as f:
+                left = n
+                while left > 0:
+                    buf = self.rfile.read(min(left, 1 << 20))
+                    if not buf:
+                        break
+                    f.write(buf)
+                    left -= len(buf)
+                f.flush()
+                os.fsync(f.fileno())
+            if left:
+                # Short body: drop what this request appended.
+                with open(part, 'r+b') as f:
+                    f.truncate(offset)
+                return self.json(400, {'success': False, 'error': 'Short chunk', 'expected_offset': offset})
+        except OSError as e:
+            return self.json(507, {'success': False, 'error': 'Write failed: %s' % e})
+        received = offset + n
+        if received < total:
+            return self.json(200, {'success': True, 'received': received, 'done': False})
+        if received > total:
+            os.remove(part)
+            return self.json(400, {'success': False, 'error': 'More bytes than X-Total'})
+        os.replace(part, UPLOAD_FINAL)
+        with open(UPLOAD_NAME, 'w') as f:
+            f.write(filename)
+        try:
+            os.remove(UPLOAD_META)
+        except OSError:
+            pass
+        log('upload complete: %s (%d bytes)' % (filename, received))
+        return self.json(200, {'success': True, 'received': received, 'done': True})
+
+    def install_status(self):
+        status = read_status()
+        if not status:
+            return self.json(200, {'state': 'idle'})
+        lines = log_lines()
+        steps = [l[3:] for l in lines if l.startswith('== ')]
+        status['step'] = steps[-1] if steps else ''
+        status['detail'] = next((l for l in reversed(lines) if l.strip()), '')
+        if status['state'] == 'running':
+            run = running_slot()
+            if run and os.path.isdir(STAGE):
+                t = other(run)
+                total = sum(os.path.getsize(os.path.join(STAGE, f)) for f in ('kernel.img', 'SYSTEM', 'dovi.ko')
+                            if os.path.exists(os.path.join(STAGE, f)))
+                pos = sum(os.path.getsize(p) for p in (os.path.join(FLASH, 'kernel_%s.img' % t),
+                                                       os.path.join(FLASH, 'SYSTEM_%s' % t),
+                                                       os.path.join(FLASH, 'dovi_%s.ko' % t))
+                          if os.path.exists(p))
+                if total:
+                    status['progress'] = {'pos': min(pos, total), 'total': total}
+        elif status['state'] == 'error':
+            status['log_tail'] = '\n'.join(lines[-50:])
+        return self.json(200, status)
+
+
+def part_path(filename):
+    return os.path.join(UPLOAD_DIR, '%s.part' % hashlib.sha1(filename.encode()).hexdigest()[:12])
+
+
+def _q(s):
+    from urllib.parse import quote
+    return quote(s, safe='')
+
+
+def main():
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    srv = ThreadingHTTPServer(('', PORT), Handler)
+    srv.daemon_threads = True
+    log('symphony-webui on :%d (flash %s, data %s)' % (PORT, FLASH, DATA))
+    srv.serve_forever()
+
+
+if __name__ == '__main__':
+    sys.exit(main())

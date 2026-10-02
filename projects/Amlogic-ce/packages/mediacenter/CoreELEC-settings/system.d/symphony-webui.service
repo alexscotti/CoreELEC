@@ -1,0 +1,12 @@
+[Unit]
+Description=Symphony Host Management web page (port 80)
+After=network.target symphony-hostname.service
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /usr/lib/coreelec/symphony-webui
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

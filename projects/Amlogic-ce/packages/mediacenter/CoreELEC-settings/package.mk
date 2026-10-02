@@ -19,6 +19,9 @@ post_makeinstall_target() {
   # symphony-coreelec-<channel> from a SYMPHONY USB stick (0 without one), and
   # patches/ keeps the add-on from resetting it to CoreELEC at Kodi start.
   sh ${PKG_DIR}/test_symphony_hostname.sh
+  # scripts/symphony-webui is the box's Host Management page (port 80): upload
+  # an A/B slot bundle, install it into the other slot, reboot, go back.
+  python3 ${PKG_DIR}/test_symphony_webui.py
 
   mkdir -p ${INSTALL}/usr/lib/coreelec
   cp ${PKG_DIR}/scripts/* ${INSTALL}/usr/lib/coreelec
@@ -32,4 +35,5 @@ post_install() {
   enable_service backup-restore.service
   enable_service factory-reset.service
   enable_service symphony-hostname.service
+  enable_service symphony-webui.service
 }

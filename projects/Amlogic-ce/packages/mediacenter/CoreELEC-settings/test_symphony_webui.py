@@ -80,6 +80,9 @@ def mdns_parser_tests():
     import importlib.machinery
     import importlib.util
     import struct
+    # No bytecode: a scripts/__pycache__/ in the package source breaks the
+    # package's own "cp scripts/*" (it did, the first build with this test).
+    sys.dont_write_bytecode = True
     loader = importlib.machinery.SourceFileLoader('sw', SERVER)
     w = importlib.util.module_from_spec(importlib.util.spec_from_loader('sw', loader))
     loader.exec_module(w)

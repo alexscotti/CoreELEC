@@ -255,7 +255,8 @@ def goback():
         if cur and cur.get('state') == 'running':
             return 'Error: an install is running.'
         p = subprocess.run(['sh', script, 'goback'], capture_output=True, text=True, timeout=600)
-    out = (p.stdout + p.stderr).strip()
+    # The installer's own lines, as one sentence: "slot.ini -> B (...) - reboot to switch".
+    out = ' - '.join(l.strip().lstrip('=').strip() for l in (p.stdout + p.stderr).splitlines() if l.strip())
     return out if p.returncode == 0 else 'Error: ' + out
 
 
@@ -727,9 +728,16 @@ class Handler(BaseHTTPRequestHandler):
         steps = [l[3:] for l in lines if l.startswith('== ')]
         status['step'] = steps[-1] if steps else ''
         status['detail'] = next((l for l in reversed(lines) if l.strip()), '')
+        if status['detail'].startswith('== '):
+            status['detail'] = ''           # already the step
         if status['state'] == 'running':
             run = running_slot()
-            if run and os.path.isdir(STAGE):
+            # Bytes written to the target slot, counted only once the
+            # installer has started on it ("== installing", then it deletes
+            # the target's manifest and files first): before that the slot
+            # still holds the OLD build and would read as 100% (measured).
+            started = any(l.startswith('== installing') for l in lines)
+            if run and started and os.path.isdir(STAGE):
                 t = other(run)
                 total = sum(os.path.getsize(os.path.join(STAGE, f)) for f in ('kernel.img', 'SYSTEM', 'dovi.ko')
                             if os.path.exists(os.path.join(STAGE, f)))
@@ -737,6 +745,8 @@ class Handler(BaseHTTPRequestHandler):
                                                        os.path.join(FLASH, 'SYSTEM_%s' % t),
                                                        os.path.join(FLASH, 'dovi_%s.ko' % t))
                           if os.path.exists(p))
+                if os.path.exists(os.path.join(FLASH, 'SLOT_%s.manifest' % t)):
+                    pos = total                 # written and being verified
                 if total:
                     status['progress'] = {'pos': min(pos, total), 'total': total}
         elif status['state'] == 'error':

@@ -1,0 +1,30 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: [PATCH] BD-J: start the JVM with -Xrs, leaving process signals to the player
+
+libbluray creates the JVM inside the player's process. Without -Xrs HotSpot
+installs its own SIGTERM/SIGINT/SIGHUP/SIGQUIT handlers, so once a BD-J disc
+has been played, a SIGTERM to the player (systemctl stop kodi) is taken by the
+JVM: it runs its shutdown sequence and calls exit() on its own thread. C++
+static destructors then run under Kodi's live threads - GUIFontManager freeing
+fonts the renderer is drawing with (FT_Done_Face SIGSEGV), the joystick
+peripheral add-on unloaded under its event thread ("pure virtual method
+called") - and Kodi dies with a core instead of shutting down.
+
+Measured on the AM9 Pro (2026-10-02): stop after a BD-J disc 2/2 crashed,
+stop without BD-J 2/2 clean, stop after BD-J with -Xrs (JAVA_TOOL_OPTIONS)
+3/3 clean.
+
+--- a/src/libbluray/bdj/bdj.c
++++ b/src/libbluray/bdj/bdj.c
+@@ -943,6 +943,11 @@
+     option[n++].optionString = str_dup   ("-Xms256M");
+     option[n++].optionString = str_dup   ("-Xmx256M");
+     option[n++].optionString = str_dup   ("-Xss2048k");
++    /* The JVM runs inside the player's process: leave SIGTERM/SIGINT/SIGHUP/SIGQUIT to
++     * the player. Without -Xrs HotSpot installs its own handlers, and a SIGTERM (a
++     * service stop) makes it call exit() on its own thread - static destructors then
++     * run under the player's live threads and it crashes on the way down. */
++    option[n++].optionString = str_dup   ("-Xrs");
+     option[n++].optionString = str_dup   ("-Djava.io.tmpdir=/storage/.kodi/userdata/addon_data/tools.jre.zulu");
+     BD_DEBUG(DBG_BDJ | DBG_CRIT, "Use /storage/.kodi/userdata/addon_data/tools.jre.zulu as cache dir.\n");
+     option[n++].optionString = str_dup   ("-Djava.awt.headless=false");

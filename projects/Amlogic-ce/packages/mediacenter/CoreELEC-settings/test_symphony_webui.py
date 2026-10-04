@@ -131,11 +131,14 @@ def main():
     open(cmdline, 'w').write('BOOT_IMAGE=kernel_A.img SYSTEM_IMAGE=SYSTEM_A quiet\n')
     open(os.path.join(flash, 'slot.ini'), 'w').write('ceslot=A\n')
     open(os.path.join(flash, 'SLOT_A.manifest'), 'w').write(
-        'SYMPHONY_VERSION=%s\nBUILD_ID=%s\nCOREELEC_VERSION=old\n' % ('c' * 40, 'b' * 40))
+        'SYMPHONY_VERSION=%s\nBUILD_ID=%s\nKODI_COMMIT=%s\nCOREELEC_VERSION=old\n' % ('c' * 40, 'b' * 40, 'e' * 40))
+    osrel = os.path.join(tmp, 'os-release')
+    open(osrel, 'w').write('VERSION="22.0"\nBUILD_ID="%s"\nKODI_COMMIT="%s"\n' % ('b' * 40, 'e' * 40))
     rebooted = os.path.join(tmp, 'rebooted')
     port = free_port()
     env = dict(os.environ, SYM_FLASH=flash, SYM_DATA=data, SYM_CMDLINE=cmdline,
-               SYM_PORT=str(port), SYM_REBOOT='touch ' + rebooted, SYM_NO_MDNS='1')
+               SYM_PORT=str(port), SYM_REBOOT='touch ' + rebooted, SYM_NO_MDNS='1',
+               SYM_OS_RELEASE=osrel)
     srv = subprocess.Popen([sys.executable, SERVER], env=env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     base = 'http://127.0.0.1:%d' % port
@@ -183,6 +186,11 @@ def main():
         page = page.decode()
         check(st == 200 and 'Running slot:</strong> A' in page, 'page shows running slot A')
         check('No firmware file uploaded' in page, 'page: nothing uploaded')
+        fork = '<a href="https://github.com/alexscotti/CoreELEC/commit/%s" target="_blank" rel="noopener">%s</a>' % ('b' * 40, 'b' * 12)
+        kodi = '<a href="https://github.com/alexscotti/xbmc/commit/%s" target="_blank" rel="noopener">%s</a>' % ('e' * 40, 'e' * 12)
+        check('Fork commit:</strong> %s' % fork in page and 'Kodi commit:</strong> %s' % kodi in page,
+              'page: running fork + Kodi commits link to GitHub')
+        check('<td>%s</td><td>%s</td></tr>' % (fork, kodi) in page, 'page: slot A row links both commits')
 
         st, j = chunk('base_1_%s_aarch64.img.gz' % VER, 0, 10, b'x' * 10)
         check(st == 400, 'Pi image name refused')
@@ -213,6 +221,9 @@ def main():
         page = req('/host_management')[1].decode()
         check('will be executed on reboot' in page and 'Cancel pending update' in page, 'page: pending switch')
         check('Reboot System to ' + VER in page, 'page: Reboot to new version')
+        check('<td>B</td><td>%s</td><td>cv</td><td><a href="https://github.com/alexscotti/CoreELEC/commit/%s"'
+              % (VER, 'b' * 40) in page and 'rel="noopener">%s</a></td><td>-</td></tr>' % ('b' * 12) in page,
+              'page: slot B from a MANIFEST without KODI_COMMIT shows - for Kodi')
         log = req('/install_log')[1].decode()
         check('== installing into slot B' in log, 'install log served')
 

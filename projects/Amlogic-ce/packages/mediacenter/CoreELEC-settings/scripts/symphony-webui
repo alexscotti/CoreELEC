@@ -45,6 +45,13 @@ DATA = os.environ.get('SYM_DATA', '/storage/.cache/symphony')
 CMDLINE = os.environ.get('SYM_CMDLINE', '/proc/cmdline')
 PORT = int(os.environ.get('SYM_PORT', '80'))
 REBOOT_CMD = os.environ.get('SYM_REBOOT', 'systemctl reboot').split()
+OS_RELEASE = os.environ.get('SYM_OS_RELEASE', '/etc/os-release')
+
+# Where the two forks a slot is built from live: BUILD_ID is a commit of the
+# CoreELEC fork, KODI_COMMIT one of the xbmc fork (os-release and MANIFEST).
+COREELEC_REPO = 'https://github.com/alexscotti/CoreELEC'
+KODI_REPO = 'https://github.com/alexscotti/xbmc'
+SHA_RE = re.compile(r'^[0-9a-f]{40}$')
 
 UPLOAD_DIR = os.path.join(DATA, 'upload')
 STAGE = os.path.join(DATA, 'webstage')
@@ -111,11 +118,22 @@ def slot_info(slot):
         return None
     return {'version': m.get('SYMPHONY_VERSION', ''),
             'build_id': m.get('BUILD_ID', ''),
+            'kodi': m.get('KODI_COMMIT', ''),
             'coreelec': m.get('COREELEC_VERSION', '')}
 
 
 def os_release():
-    return read_kv('/etc/os-release')
+    return read_kv(OS_RELEASE)
+
+
+def commit_link(repo, sha):
+    """A fork commit as a 12-character link to it on GitHub; '-' when the
+    image or MANIFEST predates the field."""
+    sha = sha.strip('"')
+    if not SHA_RE.match(sha):
+        return esc(sha[:12]) if sha else '-'
+    return ('<a href="%s/commit/%s" target="_blank" rel="noopener">%s</a>'
+            % (repo, sha, sha[:12]))
 
 
 def free_bytes(path):
@@ -496,8 +514,10 @@ def render_page(message=''):
         h.append('<p><strong>Build Version:</strong> %s</p>' % esc(cur['version'] if cur else '(no manifest)'))
     else:
         h.append('<p><strong>Build Version:</strong> (stick without A/B slots)</p>')
-    h.append('<p><strong>CoreELEC:</strong> %s &nbsp; <strong>Fork commit:</strong> %s</p>'
-             % (esc(rel.get('VERSION', '').strip('"')), esc(rel.get('BUILD_ID', '').strip('"')[:12])))
+    h.append('<p><strong>CoreELEC:</strong> %s &nbsp; <strong>Fork commit:</strong> %s'
+             ' &nbsp; <strong>Kodi commit:</strong> %s</p>'
+             % (esc(rel.get('VERSION', '').strip('"')), commit_link(COREELEC_REPO, rel.get('BUILD_ID', '')),
+                commit_link(KODI_REPO, rel.get('KODI_COMMIT', ''))))
     h.append('<p><strong>Uptime:</strong> %s | <strong>Free (/flash):</strong> %s | '
              '<strong>Free (/storage):</strong> %s</p>'
              % (uptime_s, fmt_bytes(free_bytes(FLASH)), fmt_bytes(free_bytes(os.path.dirname(DATA.rstrip('/')) or '/'))))
@@ -512,13 +532,14 @@ def render_page(message=''):
         h.append('<p><strong>Running slot:</strong> %s%s</p>'
                  % (run, ' &nbsp; <span style="color: orange;">(slot %s selected for the next boot)</span>' % sel
                     if pending else ''))
-        h.append('<table class="slots"><tr><th>Slot</th><th>Version</th><th>CoreELEC</th><th>Fork commit</th></tr>')
+        h.append('<table class="slots"><tr><th>Slot</th><th>Version</th><th>CoreELEC</th><th>Fork commit</th><th>Kodi commit</th></tr>')
         for s in 'AB':
             i = slots[s]
-            h.append('<tr%s><td>%s%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+            h.append('<tr%s><td>%s%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
                      % (' class="running"' if s == run else '', s, ' (running)' if s == run else '',
                         esc(i['version']) if i else '<em>empty</em>', esc(i['coreelec']) if i else '',
-                        esc(i['build_id'][:12]) if i else ''))
+                        commit_link(COREELEC_REPO, i['build_id']) if i else '',
+                        commit_link(KODI_REPO, i['kodi']) if i else ''))
         h.append('</table>')
     h.append('<p style="color: #666; font-size: 0.9em; margin: 10px 0;">Expected filename pattern: '
              '<strong>coreelec_*_aarch64_slot.tar</strong></p>')

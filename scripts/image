@@ -188,6 +188,8 @@ EOF
 [ -n "${DEVICE}" ] && echo "DISTRO_DEVICE=\"${DEVICE}\"" >>${INSTALL}/etc/os-release
 [ -n "${BUILDER_NAME}" ] && echo "BUILDER_NAME=\"${BUILDER_NAME}\"" >>${INSTALL}/etc/os-release
 [ -n "${BUILDER_VERSION}" ] && echo "BUILDER_VERSION=\"${BUILDER_VERSION}\"" >>${INSTALL}/etc/os-release
+# The Kodi source commit (our xbmc fork) - Symphony's Host Management page shows it
+[ "${MEDIACENTER}" = "kodi" ] && echo "KODI_COMMIT=\"$(get_pkg_version kodi)\"" >>${INSTALL}/etc/os-release
 
 # Add release notes / changelog
 

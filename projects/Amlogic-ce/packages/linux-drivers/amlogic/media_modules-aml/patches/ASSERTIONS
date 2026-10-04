@@ -16,3 +16,7 @@ drivers/frame_provider/decoder/utils/vdec.c:decodes against the wp of the master
 drivers/frame_provider/decoder/utils/vdec.c:				WRITE_VREG(VLD_MEM_VIFIFO_WP,:3
 drivers/frame_provider/decoder/utils/vdec.c:				WRITE_VREG(HEVC_STREAM_WR_PTR,:3
 drivers/frame_provider/decoder/utils/vdec.c:					STBUF_READ(&vdec->vbuf, get_wp));:6
+
+# --- 9002: the DMC channel idle wait is bounded (no RT spin forever after a stalled decode) ---
+drivers/frame_provider/decoder/utils/vdec.c:dmc channel idle timeout:1
+drivers/frame_provider/decoder/utils/vdec.c:		timeout = jiffies + HZ / 10;:1

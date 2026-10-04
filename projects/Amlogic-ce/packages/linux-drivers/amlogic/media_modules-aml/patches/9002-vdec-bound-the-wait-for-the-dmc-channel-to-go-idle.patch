@@ -1,0 +1,64 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: vdec: bound the wait for the DMC channel to go idle
+
+dec_dmc_port_ctrl() turns a decoder's memory requests off and then spins until
+the memory controller reports the channel idle, with no timeout. On S6 (no
+VDEC bus-control block) every H.264 run goes through it: run() ->
+vdec_reset_core() -> dec_pipeline_idle_ctrl(VLD, 0) -> dec_dmc_port_ctrl(),
+on the vdec-core thread at SCHED_FIFO priority.
+
+An AM9 Pro (S6) playing A.I. Artificial Intelligence was found with its
+H.264 decoder timed out on the film's first frame (pc 0x149, status 0xf0 =
+still searching for a header, input level not moving), vdec-core then
+RT-throttled every second for as long as the box stayed up, and the decoder
+instance stuck ACTIVE ("vdec_disconnect timeout!!! status: 0x3"). Kodi could
+not close the decoder, the box hung in shutdown, and only cutting AC brought
+it back. A run that never returns is what keeps an instance ACTIVE; this is
+the unbounded wait on that run path.
+
+Bound it at 100ms (a healthy channel goes idle in microseconds), log the DMC
+request and status words when it expires, and carry on so the core reset that
+follows can recover the decoder.
+
+---
+--- a/drivers/frame_provider/decoder/utils/vdec.c
++++ b/drivers/frame_provider/decoder/utils/vdec.c
+@@ -939,6 +939,7 @@
+ static void dec_dmc_port_ctrl(bool dmc_on, u32 target)
+ {
+ 	unsigned long flags;
++	unsigned long timeout;
+ 	unsigned int sts_reg_addr = DMC_CHAN_STS;
+ 	unsigned int mask = 0;
+ 	unsigned int cpu_type = get_cpu_major_id();
+@@ -1028,9 +1029,27 @@
+ 			sts_reg_addr = DMC_CHAN_STS;
+ 			break;
+ 		}
+-		while (!(codec_dmcbus_read(sts_reg_addr)
+-				& mask))
+-				;
++		/*
++		 * Bounded: the decoder core thread calls this at RT priority at the
++		 * start of every run (vdec_reset_core). If the channel never reports
++		 * idle - a decode that stalled with its memory requests in flight -
++		 * an unbounded wait spins that thread forever: no decoder can run or
++		 * close again, the player blocks in the driver, and the box needs a
++		 * power cycle. An S6 (AM9 Pro) was found that way - vdec-core
++		 * RT-throttled, its vdec stuck ACTIVE - right after an H.264
++		 * first-frame decode timeout; this is the unbounded wait on the run
++		 * path for S6's VLD. Go on and let the reset that follows recover.
++		 */
++		timeout = jiffies + HZ / 10;
++		while (!(codec_dmcbus_read(sts_reg_addr) & mask)) {
++			if (time_after(jiffies, timeout)) {
++				pr_err("%s: dmc channel idle timeout, target %d req 0x%x sts 0x%x mask 0x%x\n",
++					__func__, target,
++					codec_dmcbus_read(DMC_REQ_CTRL),
++					codec_dmcbus_read(sts_reg_addr), mask);
++				break;
++			}
++		}
+ 	}
+ }
+ 

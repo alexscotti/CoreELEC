@@ -178,8 +178,11 @@ def read_status():
             status = json.load(f)
     except (OSError, ValueError):
         return None
-    if status.get('state') == 'running' and not (_install_thread and _install_thread.is_alive()):
+    t = _install_thread
+    if status.get('state') == 'running' and (t is None or (t.ident is not None and not t.is_alive())):
         # This process restarted mid-install: nothing is waiting on it.
+        # (A thread not yet started - ident None - is start_install between
+        # writing 'running' and starting it.)
         status.update(state='error', error='The install was interrupted (the web server restarted). '
                                            'See the install log; the box still boots the slot it ran.')
     return status
@@ -193,11 +196,9 @@ def log_lines():
         return []
 
 
-def run_install(name, version):
-    """Background: unpack the upload, check its installer, run it."""
-    status = {'state': 'running', 'kind': 'install', 'version': version,
-              'started': time.time()}
-    write_status(status)
+def run_install(name, status):
+    """Background: unpack the upload, check its installer, run it. start_install
+    has written status ('running') already."""
     logf = open(INSTALL_LOG, 'w')
 
     def say(msg):
@@ -261,7 +262,12 @@ def start_install():
             return 'Error: no firmware uploaded.'
         if not running_slot():
             return 'Error: this stick has no A/B slots.'
-        _install_thread = threading.Thread(target=run_install, args=(name, version), daemon=True)
+        # 'running' is on disk before the POST that started it returns, so no
+        # status read after it can see the previous install's result.
+        status = {'state': 'running', 'kind': 'install', 'version': version,
+                  'started': time.time()}
+        _install_thread = threading.Thread(target=run_install, args=(name, status), daemon=True)
+        write_status(status)
         _install_thread.start()
     return None
 

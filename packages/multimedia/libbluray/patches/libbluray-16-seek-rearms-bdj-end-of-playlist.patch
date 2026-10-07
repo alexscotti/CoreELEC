@@ -1,0 +1,30 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Date: Tue, 6 Oct 2026 23:30:00 -0700
+Subject: [PATCH] seek: re-arm the BD-J end-of-playlist notification
+
+A seek puts the end of the playlist ahead again, but end_of_playlist stayed
+"processed" (3) and is only cleared when a playlist opens, so the next
+arrival at the end never sent BDJ_EVENT_END_OF_PLAYLIST. A BD-J menu that
+loops its background by seeking back on END_OF_PLAYLIST (Airplane!'s 1s
+main-menu clip, 00043.mpls) heard it once and then waited forever on a
+black screen with its buttons up. Upstream has the same code.
+---
+ src/libbluray/bluray.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+--- a/src/libbluray/bluray.c	2026-10-07 06:12:01.169431002 +0000
++++ b/src/libbluray/bluray.c	2026-10-07 06:12:01.169431002 +0000
+@@ -2001,6 +2001,11 @@
+         /* update title position */
+         bd->s_pos = (uint64_t)title_pkt * 192;
+ 
++        /* the end of the playlist is ahead again: re-arm its BD-J
++         * notification, or an application that loops a playlist by seeking
++         * back on END_OF_PLAYLIST hears it only once and waits forever */
++        bd->end_of_playlist = 0;
++
+         /* Update PSR_TIME */
+         media_time = _update_time_psr_from_stream(bd);
+ 
+-- 
+2.46.0

@@ -81,6 +81,8 @@ src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:ret = false;               
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:mask initPresent() set while this command was already running) */:1
 # 15 JVM leaves process signals to the player
 src/libbluray/bdj/bdj.c:option[n++].optionString = str_dup   ("-Xrs");:1
+# 16 a seek re-arms the BD-J end-of-playlist notification
+src/libbluray/bluray.c:back on END_OF_PLAYLIST hears it only once and waits forever */:1
 # 39 pre-1.5.1 hardening backport
 src/libbluray/bdj/java/org/dvb/dsmcc/NPTRate.java:    NPTRate(int numerator, int denominator) {:1
 src/libbluray/bdj/java/org/dvb/event/EventManager.java:protected EventManager() {:1

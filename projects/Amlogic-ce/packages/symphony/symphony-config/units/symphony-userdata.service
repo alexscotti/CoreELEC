@@ -1,9 +1,14 @@
 [Unit]
 Description=Symphony: Kodi userdata files the image has to supply
-# The two Kodi userdata files with no hook of their own: cec_HDMI.xml (there
-# is no JSON-RPC for peripheral settings) and the CoreELEC Settings add-on's
-# oe_settings.xml (which is what answers its first-run wizard). kodi-config
-# covers guisettings.xml and sources.xml; nothing covers these.
+# The Kodi userdata files the image has to supply: guisettings.xml (every
+# setting this rig needs that Kodi does not already default to),
+# cec_HDMI.xml (there is no JSON-RPC for peripheral settings) and the CoreELEC
+# Settings add-on's oe_settings.xml (which answers its first-run wizard).
+#
+# Before kodi.service, which is what makes this work for guisettings.xml:
+# kodi-config copies Kodi's own default into userdata only if there is none,
+# and by then ours is there. Putting ours in /usr/share/kodi/config/ instead
+# does NOT work - the kodi package owns that path and installs after us.
 #
 # cp -iRp, the idiom userconfig-setup uses: a file already in /storage wins,
 # so a setting changed on the box stays changed.

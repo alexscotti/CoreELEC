@@ -23,9 +23,15 @@ PKG_TOOLCHAIN="manual"
 #   /usr/config/*                  userconfig.service -> /storage/.config/
 #                                  (cp -iRp: never overwrites what is there)
 #   /usr/cache/*                   usercache.service  -> /storage/.cache/
-#   /usr/share/kodi/config/        kodi-config, when userdata has no copy
-#   /usr/share/symphony/userdata/  symphony-userdata.service, below: the two
-#                                  Kodi userdata files with no hook of their own
+#   /usr/share/symphony/userdata/  symphony-userdata.service, below
+#
+# guisettings.xml goes through our own unit rather than CoreELEC's
+# /usr/share/kodi/config/, which would be the obvious home for it: the kodi
+# package owns that path and installs AFTER this one, so a copy left there is
+# silently replaced by Kodi's own 4-line default (measured: the first build of
+# this package shipped the stock file). Our unit runs at sysinit, so by the
+# time kodi-config asks whether userdata has a guisettings.xml, ours is there
+# and it does nothing.
 #
 # NOT here, because the image already has them byte for byte and the hooks
 # above restore them: aacs/KEYDB.cfg, hosts.conf, idmapd.conf, nfs.conf,
@@ -47,14 +53,13 @@ PKG_TOOLCHAIN="manual"
 # rather than every box cloning the one the tarball was captured from.
 makeinstall_target() {
   mkdir -p ${INSTALL}/usr/config ${INSTALL}/usr/cache \
-           ${INSTALL}/usr/share/kodi/config ${INSTALL}/usr/share/symphony/userdata \
+           ${INSTALL}/usr/share/symphony/userdata \
            ${INSTALL}/usr/lib/systemd/system/sysinit.target.wants \
            ${INSTALL}/usr/lib/systemd/system/tz-data.service.d \
            ${INSTALL}/usr/lib/tmpfiles.d
 
   cp -a ${PKG_DIR}/config/usr-config/.    ${INSTALL}/usr/config/
   cp -a ${PKG_DIR}/config/usr-cache/.     ${INSTALL}/usr/cache/
-  cp -a ${PKG_DIR}/config/kodi-config/.   ${INSTALL}/usr/share/kodi/config/
   cp -a ${PKG_DIR}/config/userdata/.      ${INSTALL}/usr/share/symphony/userdata/
   chmod +x ${INSTALL}/usr/config/autostart.sh
 

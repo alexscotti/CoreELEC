@@ -1,0 +1,31 @@
+# Ugoos UR-02 (shipped with the AM9 Pro), NEC address 0x19.
+# Derived from CoreELEC/remotes AmRemote/Ugoos UR-02/remote.conf
+# (factory_code 0xe6190001 = address 0x19, inverse 0xE6), with Linux
+# keycodes chosen for what Kodi acts on rather than the vendor's literals.
+[[protocols]]
+name = "ugoos_ur02"
+protocol = "nec"
+[protocols.scancodes]
+0x1974 = "KEY_POWER"
+0x1967 = "KEY_UP"
+0x196c = "KEY_DOWN"
+0x1969 = "KEY_LEFT"
+0x196a = "KEY_RIGHT"
+0x1961 = "KEY_OK"
+0x199e = "KEY_BACK"
+0x19ac = "KEY_HOMEPAGE"
+0x198b = "KEY_MENU"
+0x1973 = "KEY_VOLUMEUP"
+0x1972 = "KEY_VOLUMEDOWN"
+0x1971 = "KEY_MUTE"
+0x1992 = "KEY_CHANNELUP"
+0x1993 = "KEY_CHANNELDOWN"
+0x19a4 = "KEY_PLAYPAUSE"
+0x19a3 = "KEY_NEXTSONG"
+0x19a5 = "KEY_PREVIOUSSONG"
+0x19d9 = "KEY_SEARCH"
+0x19ab = "KEY_AUDIO"
+0x1941 = "KEY_VOICECOMMAND"
+0x190e = "KEY_BACKSPACE"
+0x1996 = "KEY_WWW"
+0x1917 = "KEY_COMPOSE"

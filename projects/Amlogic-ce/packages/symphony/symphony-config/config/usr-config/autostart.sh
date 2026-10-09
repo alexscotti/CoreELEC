@@ -1,0 +1,2 @@
+#!/bin/sh
+ethtool -s eth0 wol g

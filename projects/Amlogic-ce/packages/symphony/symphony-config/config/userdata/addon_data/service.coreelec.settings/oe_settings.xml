@@ -1,0 +1,30 @@
+<?xml version="1.0" ?>
+<coreelec>
+	<addon_config/>
+	<settings>
+		<bluetooth>
+			<default_audio_device>ALSA:surround71:CARD=AMLAUGESOUND,DEV=0|AML-AUGESOUND</default_audio_device>
+		</bluetooth>
+		<system>
+			<wizard_completed>True</wizard_completed>
+		</system>
+		<connman>
+			<wizard_completed>True</wizard_completed>
+		</connman>
+		<services>
+			<wizard_completed>True</wizard_completed>
+		</services>
+		<about>
+			<wizard_completed>True</wizard_completed>
+		</about>
+		<coreelec>
+			<wizard_completed>True</wizard_completed>
+		</coreelec>
+		<updates>
+			<AutoUpdate>manual</AutoUpdate>
+		</updates>
+		<hardware>
+			<wol>on</wol>
+		</hardware>
+	</settings>
+</coreelec>

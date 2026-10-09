@@ -1,0 +1,20 @@
+[Unit]
+Description=Symphony: Kodi userdata files the image has to supply
+# The two Kodi userdata files with no hook of their own: cec_HDMI.xml (there
+# is no JSON-RPC for peripheral settings) and the CoreELEC Settings add-on's
+# oe_settings.xml (which is what answers its first-run wizard). kodi-config
+# covers guisettings.xml and sources.xml; nothing covers these.
+#
+# cp -iRp, the idiom userconfig-setup uses: a file already in /storage wins,
+# so a setting changed on the box stays changed.
+DefaultDependencies=no
+After=systemd-tmpfiles-setup.service local-fs.target
+Before=kodi.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'mkdir -p /storage/.kodi/userdata && false | cp -iRp /usr/share/symphony/userdata/* /storage/.kodi/userdata/ &>/dev/null; exit 0'
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,33 @@
+<settings version="4">
+  <setting id="lookandfeel.skin">skin.estuary.symphony</setting>
+  <setting id="screensaver.mode" />
+  <setting id="screensaver.usedimonpause">false</setting>
+  <setting id="myvideos.extractflags">false</setting>
+  <setting id="myvideos.extracthdr10plus">false</setting>
+  <setting id="myvideos.extractchapterthumbs">false</setting>
+  <setting id="myvideos.extractthumb">false</setting>
+  <setting id="videoplayer.stereoscopicplaybackmode">1</setting>
+  <setting id="disc.playback">2</setting>
+  <setting id="services.webserver">true</setting>
+  <setting id="services.webserverpassword">symphony</setting>
+  <setting id="services.esallinterfaces">true</setting>
+  <setting id="services.upnpannounce">false</setting>
+  <setting id="services.upnpplayervolumesync">false</setting>
+  <setting id="services.airplay">false</setting>
+  <setting id="services.wsdiscovery">false</setting>
+  <setting id="smb.chunksize">1024</setting>
+  <setting id="filecache.memorysize">128</setting>
+  <setting id="videoscreen.resolution">25</setting>
+  <setting id="videoscreen.whitelist">0384002160060.00000pstd,0384002160059.94006pstd,0384002160050.00000pstd,0384002160030.00000pstd,0384002160029.97003pstd,0384002160025.00000pstd,0384002160024.00000pstd,0384002160023.97602pstd,0192001080024.00000ptabfrp,0192001080023.97602ptabfrp</setting>
+  <setting id="audiooutput.audiodevice">ALSA:surround71:CARD=AMLAUGESOUND,DEV=0|AML-AUGESOUND</setting>
+  <setting id="audiooutput.channels">10</setting>
+  <setting id="audiooutput.passthrough">true</setting>
+  <setting id="audiooutput.passthroughdevice">ALSA:hdmi:CARD=AMLAUGESOUND,DEV=0|AML-AUGESOUND</setting>
+  <setting id="powermanagement.restartplayer">false</setting>
+  <setting id="powermanagement.shutdownstate">3</setting>
+  <setting id="addons.updatemode">1</setting>
+  <setting id="coreelec.amlogic.dolbyvisionled">1</setting>
+  <setting id="coreelec.amlogic.dolbyvision.cmv40.append">4</setting>
+  <setting id="system.playlistspath">special://profile/playlists/</setting>
+  <settinglevel>3</settinglevel>
+</settings>

@@ -6,6 +6,12 @@ PKG_VERSION="1.0"
 PKG_LICENSE="GPL-2.0-only WITH Classpath-exception-2.0"
 PKG_SITE="https://github.com/alexscotti/CoreELEC"
 PKG_URL=""
+# LOAD-BEARING, do not trim: for a package in the image's dependency closure
+# (this one arrives via ADDITIONAL_PACKAGES -> misc-packages) the build installs
+# every target dependency into the image, which is what puts the X client
+# libraries in /usr/lib. Nothing else does - this is a DISPLAYSERVER="" build
+# and the stock image has no libX11 at all. Drop a name here and BD-J loses a
+# library with no other source.
 PKG_DEPENDS_TARGET="toolchain libXext libXi libXrender chrome-libXtst jre-libXinerama"
 PKG_DEPENDS_UNPACK="jdk-${TARGET_ARCH}-zulu"
 # PKG_DEPENDS_UNPACK does NOT feed calculate_stamp (see libbluray/package.mk
@@ -29,43 +35,41 @@ PKG_TOOLCHAIN="manual"
 # BD-J jars, and that package's post_unpack is what renames jre/lib/aarch64 to
 # jre/lib/arm (which libbluray requires) and leaves the symlink back.
 #
-# The layout is the add-on's, verbatim, at the ONE path Kodi's own
-# /etc/profile.d/00-addons.conf sibling already handles: 99-kodi.conf globs
-# /usr/lib/kodi/addons/*/lib into LD_LIBRARY_PATH, which is how the JRE finds
-# the X libraries it carries (none of libX11/Xext/Xi/Xrender/Xtst/Xinerama/xcb
-# is in SYSTEM). What that glob does NOT do is source profile.d/*.profile from
-# the image side - 00-addons.conf reads /storage/.kodi/addons/*/ only - so
-# JAVA_HOME is set by our own /etc/profile.d file instead of the add-on's
-# jre.profile.
+# The layout is the add-on's, minus its private lib/ directory.
+#
+# Upstream's add-on carries its own copies of libX11, libxcb, libXext, libXi,
+# libXrender, libXtst and libXinerama because an ADD-ON cannot assume anything
+# about the image, and on a DISPLAYSERVER="" build it is right not to: the
+# stock image has no libX11 anywhere. In the image that reason is gone -
+# PKG_DEPENDS_TARGET above puts them in /usr/lib - and a private copy would
+# never be used anyway: 98-busybox.conf sets LD_LIBRARY_PATH=/usr/lib and
+# 99-kodi.conf APPENDS the addon lib dirs, so /usr/lib is searched first. The
+# copies this package used to make were byte-identical to the ones in
+# /usr/lib and unreachable behind them.
+#
+# For the record, since it decides nothing but explains the small dependency
+# list: jre/lib/arm/libawt_xawt.so needs libXcomposite and libXrandr too, and
+# NEITHER is in the image or in upstream's add-on, so the X AWT backend has
+# never been loadable on this box in either scheme. BD-J does not need it -
+# libbluray runs its own toolkit (-Dawt.toolkit=java.awt.BDToolkit,
+# java.awt.graphicsenv=java.awt.BDGraphicsEnvironment) - and of the seven,
+# only libsplashscreen.so (libX11, libXext) has a user at all. The set is
+# upstream's; it is kept as-is rather than guessed at.
+#
+# What the add-on's own profile.d would have done, JAVA_HOME, is done by our
+# /etc/profile.d file instead: 00-addons.conf sources profile.d/*.profile out
+# of /storage/.kodi/addons/*/ only, never the image side.
 #
 # LIBBLURAY_CP is deliberately NOT set. The add-on's jre.profile pointed it at
 # the add-on's own jars; since libbluray-08-bdj-prefer-installed-jar-over-
 # LIBBLURAY_CP (SamuriHL, 2026-09-23) libbluray searches /usr/share/java
 # first, which is where this build's own jars are installed, so the jars beside
 # the JRE are not read at all and are not copied in below.
-_pkg_copy_lib() {
-  find "${2}/usr/lib" -regextype sed -regex ".*/${1}\.so\.[0-9]*" \
-    -exec cp {} "${INSTALL}/usr/lib/kodi/addons/tools.jre.zulu/lib" \;
-}
-
 makeinstall_target() {
   local dst="${INSTALL}/usr/lib/kodi/addons/tools.jre.zulu"
-  mkdir -p ${dst}/lib ${INSTALL}/etc/profile.d
+  mkdir -p ${dst} ${INSTALL}/etc/profile.d
 
   cp -a $(get_build_dir jdk-${TARGET_ARCH}-zulu)/jre ${dst}
-
-  # The libraries the JVM needs that SYSTEM does not have. Same list as the
-  # add-on's, and the same reason: this is a no-X11 image (DISPLAYSERVER is
-  # empty), so all of them have to come along, not just the two.
-  _pkg_copy_lib libXtst     $(get_install_dir chrome-libXtst)
-  _pkg_copy_lib libXinerama $(get_install_dir jre-libXinerama)
-  if [ "${DISPLAYSERVER}" != "X11" ]; then
-    _pkg_copy_lib libXi      $(get_install_dir libXi)
-    _pkg_copy_lib libXrender $(get_install_dir libXrender)
-    _pkg_copy_lib libX11     $(get_install_dir libX11)
-    _pkg_copy_lib libXext    $(get_install_dir libXext)
-    _pkg_copy_lib libxcb     $(get_install_dir libxcb)
-  fi
 
   cat > ${INSTALL}/etc/profile.d/15-symphony-jre.conf <<'PROFILE'
 # BD-J menus: libbluray starts a JVM from JAVA_HOME (bdj.c; with none set it

@@ -8,7 +8,7 @@
 # running, reboot into it, or go back to the other slot.
 #
 # A firmware image here is a slot bundle, coreelec_<date>_<version>_aarch64_slot.tar:
-# kernel.img, SYSTEM, dovi.ko, MANIFEST and am9slot.sh, the installer that
+# kernel.img, SYSTEM, MANIFEST and am9slot.sh, the installer that
 # goes with it. Installing runs THAT installer (its sha256 is in the MANIFEST),
 # so the installer always matches what it installs; it leaves a copy of itself
 # at /flash/am9slot.sh, which goback uses.
@@ -65,7 +65,12 @@ INSTALL_LOG = os.path.join(DATA, 'install.log')
 # response to the page after a 32MB request body.
 CHUNK_SIZE = 8 * 1024 * 1024
 NAME_RE = re.compile(r'^coreelec_[0-9]+_([0-9a-f]{40}|current-[0-9]+)_aarch64_slot\.tar$')
-BUNDLE_FILES = ('MANIFEST', 'kernel.img', 'SYSTEM', 'dovi.ko', 'am9slot.sh')
+# dovi.ko is NOT one of them: Amlogic's module is in no image and no bundle,
+# and the box captures it from a USB stick at boot (symphony-dovi). A bundle
+# built before 2026-10-09 still carries one; it is simply ignored here, and
+# am9slot.sh clears any dovi_<slot>.ko it finds in the slot it writes.
+BUNDLE_FILES = ('MANIFEST', 'kernel.img', 'SYSTEM', 'am9slot.sh')
+BUNDLE_IGNORED = ('dovi.ko',)
 BUNDLE_OPTIONAL = ('symphony.tar',)       # the installer unpacks it; this server never opens it
 
 _lock = threading.Lock()          # one install/goback at a time
@@ -214,7 +219,7 @@ def run_install(name, status):
             members = tf.getmembers()
             names = sorted(m.name for m in members)
             missing = [f for f in BUNDLE_FILES if f not in names]
-            extra = [n for n in names if n not in BUNDLE_FILES + BUNDLE_OPTIONAL]
+            extra = [n for n in names if n not in BUNDLE_FILES + BUNDLE_OPTIONAL + BUNDLE_IGNORED]
             if missing or extra or not all(m.isfile() for m in members):
                 raise RuntimeError('not a slot bundle (missing %s, unexpected %s)' % (missing, extra))
             for m in members:
@@ -885,11 +890,10 @@ class Handler(BaseHTTPRequestHandler):
             if run and os.path.isdir(STAGE) and any(l.startswith('== installing') for l in lines):
                 t = other(run)
                 since = status.get('started', 0)
-                total = sum(os.path.getsize(os.path.join(STAGE, f)) for f in ('kernel.img', 'SYSTEM', 'dovi.ko')
+                total = sum(os.path.getsize(os.path.join(STAGE, f)) for f in ('kernel.img', 'SYSTEM')
                             if os.path.exists(os.path.join(STAGE, f)))
                 pos = 0
-                for p in (os.path.join(FLASH, 'kernel_%s.img' % t), os.path.join(FLASH, 'SYSTEM_%s' % t),
-                          os.path.join(FLASH, 'dovi_%s.ko' % t)):
+                for p in (os.path.join(FLASH, 'kernel_%s.img' % t), os.path.join(FLASH, 'SYSTEM_%s' % t)):
                     try:
                         st = os.stat(p)
                     except OSError:

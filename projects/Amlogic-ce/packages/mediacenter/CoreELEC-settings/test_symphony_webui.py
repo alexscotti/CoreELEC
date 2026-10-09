@@ -57,8 +57,7 @@ echo "== slot B verified"
 
 
 def bundle(installer=STUB, sha=None, drop=None, payload=b'S' * 300000, extra=None):
-    files = {'kernel.img': b'K' * 1000, 'SYSTEM': payload, 'dovi.ko': b'D' * 100,
-             'am9slot.sh': installer}
+    files = {'kernel.img': b'K' * 1000, 'SYSTEM': payload, 'am9slot.sh': installer}
     files.update(extra or {})
     man = ('SYMPHONY_VERSION=%s\nBUILD_ID=%s\nCOREELEC_VERSION=cv\nam9slot_sha256=%s\n'
            % (VER, 'b' * 40, sha or hashlib.sha256(installer).hexdigest())).encode()
@@ -233,9 +232,15 @@ def main():
         check(s.get('state') == 'error' and 'am9slot_sha256' in s.get('error', ''), 'tampered installer refused')
         check(os.path.exists(os.path.join(data, 'upload', 'firmware_slot.tar')), 'failed upload kept for a retry')
 
-        upload(bundle(drop='dovi.ko'))
+        upload(bundle(drop='kernel.img'))
         s = install_and_wait()
         check(s.get('state') == 'error' and 'not a slot bundle' in s.get('error', ''), 'incomplete bundle refused')
+
+        # A bundle built before dovi.ko left the bundle still carries one.
+        # It is ignored, not rejected as an unexpected member.
+        upload(bundle(extra={'dovi.ko': b'D' * 100}))
+        s = install_and_wait()
+        check(s.get('state') == 'done', 'a bundle with a legacy dovi.ko still installs')
 
         # symphony.tar (the Symphony overlay) is an optional member.
         upload(bundle(extra={'symphony.tar': b'T' * 100}))
@@ -270,7 +275,7 @@ def main():
                 early = s['progress']
                 break
             time.sleep(0.05)
-        check(early is not None and early['pos'] == 0 and early['total'] == 1000 + 300000 + 100,
+        check(early is not None and early['pos'] == 0 and early['total'] == 1000 + 300000,
               'progress: full total, nothing counted from the old build (%s)' % early)
         for _ in range(100):
             s = json.loads(req('/firmware_install_status')[1])

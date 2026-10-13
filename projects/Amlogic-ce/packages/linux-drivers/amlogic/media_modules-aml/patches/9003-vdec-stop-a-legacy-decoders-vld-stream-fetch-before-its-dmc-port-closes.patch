@@ -1,0 +1,80 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: vdec: stop a legacy decoder's VLD stream fetch before its DMC port closes
+
+vdec_release() closes the decoder's DMC port (vdec_disable_DMC) before the
+driver's own remove() runs, then powers the block off in vdec_destroy(). A
+multi-instance decoder is idle by then: it runs the VLD stream fetch only
+inside a run, and vdec_prepare_input() stops it before each reset. A legacy
+single-instance decoder (amvdec_h264mvc, the only 3D MVC decoder) leaves the
+fetch running for its whole life, and nothing stops it before release. The
+fetch reads the stream buffer by itself whenever its FIFO has room; a request
+it issues after the port is closed is held there, the power-off reset cuts it
+mid-transaction, and the port never reports idle again.
+
+On an AM9 Pro (S6) that is a box that needs a power cycle: every later H.264
+or MVC decode stalls with its writes unanswered (amvdec_stop "rsp 3f000fff",
+firmware parked at pc 0x7e3-0x7e6, "dmc channel idle timeout" at each close),
+and with no decoder open the DMC still shows the VDEC channel busy (DMC_CHAN_STS
+bit 8 clear; neither a DMC port soft reset nor re-enabling the port clears it).
+A close ~55 ms into an MVC decode - Kodi reopening the decoder at a Blu-ray
+playlist change while the firmware waits for its buffer allocation - did it
+about one time in ten: 9 and 16 open/close cycles in two stress runs.
+
+Stop the AMRISC and the VLD stream fetch, and let a stream swap DMA in flight
+finish, before the port closes.
+
+---
+--- a/drivers/frame_provider/decoder/utils/vdec.c
++++ b/drivers/frame_provider/decoder/utils/vdec.c
+@@ -4140,6 +4140,41 @@
+ 
+ /* vdec_create/init/release/destroy are applied to both dual running decoders
+  */
++/*
++ * A legacy single-instance decoder (amvdec_h264mvc, the 3D MVC decoder) keeps
++ * its VLD stream fetch running for its whole life: nothing stops it before
++ * release, and the driver's own remove() runs after vdec_disable_DMC() below.
++ * The fetch engine reads the stream buffer by itself whenever its FIFO has
++ * room - not tied to the AMRISC, which vdec_disable_DMC() does stop. A fetch
++ * issued after the DMC port is closed is held at the port; the power-off
++ * reset in vdec_destroy() then cuts it mid-transaction, and the port never
++ * reports idle again: every later H.264/MVC decode stalls with its writes
++ * unanswered (amvdec_stop "rsp 3f000fff", the bounded idle wait expiring) until
++ * the box is power cycled. On an AM9 Pro (S6) a close ~55 ms into an MVC
++ * decode - Kodi reopening the decoder at a Blu-ray playlist change, the
++ * firmware just waiting for its buffer allocation - did that about one time
++ * in ten. Multi-instance decoders run the fetch only inside a run, and
++ * vdec_prepare_input() stops it first, as this does.
++ */
++static void vdec_single_quiesce_vld(void)
++{
++	ulong timeout;
++
++	/* the AMRISC first: it can restart the fetch */
++	WRITE_VREG(MPSR, 0);
++	WRITE_VREG(CPSR, 0);
++	WRITE_VREG(VLD_MEM_VIFIFO_CONTROL, 0);
++	/* and a stream swap DMA in flight finishes */
++	timeout = jiffies + HZ / 10;
++	while (READ_VREG(VLD_MEM_SWAP_CTL) & (1 << 7)) {
++		if (time_after(jiffies, timeout)) {
++			pr_err("%s: vld swap dma still busy\n", __func__);
++			break;
++		}
++	}
++	pr_info("%s: vld stream fetch stopped before the dmc port closes\n", __func__);
++}
++
+ void vdec_release(struct vdec_s *vdec)
+ {
+ 	u32 wcount = 0;
+@@ -4205,6 +4240,9 @@
+ 
+ 	vdec_inactive_core_reset(vdec);
+ 
++	if (vdec_single(vdec) && vdec->input.target == VDEC_INPUT_TARGET_VLD)
++		vdec_single_quiesce_vld();
++
+ 	if (atomic_read(&vdec_core->vdec_nr) == 1) {
+ 		vdec_disable_DMC(vdec);
+ 		vdec_set_vf_dur(0);

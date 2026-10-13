@@ -20,3 +20,7 @@ drivers/frame_provider/decoder/utils/vdec.c:					STBUF_READ(&vdec->vbuf, get_wp)
 # --- 9002: the DMC channel idle wait is bounded (no RT spin forever after a stalled decode) ---
 drivers/frame_provider/decoder/utils/vdec.c:dmc channel idle timeout:1
 drivers/frame_provider/decoder/utils/vdec.c:		timeout = jiffies + HZ / 10;:1
+
+# --- 9003: a legacy (single) decoder stops its VLD stream fetch before the DMC port closes ---
+drivers/frame_provider/decoder/utils/vdec.c:vdec_single_quiesce_vld:2
+drivers/frame_provider/decoder/utils/vdec.c:vld stream fetch stopped before the dmc port closes:1

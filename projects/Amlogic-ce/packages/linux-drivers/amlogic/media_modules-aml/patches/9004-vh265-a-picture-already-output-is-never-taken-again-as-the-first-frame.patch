@@ -1,0 +1,65 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: vh265: a picture already output is never taken again as the first frame
+
+output_pic() force-picks the first I picture for display in a Dolby Vision
+dual-layer decoder (vdec->master or ->slave) whenever vf_pre_count is still
+0 - without checking that the picture is waiting for output. When that
+picture is recycled instead of shown (error_mark, nodisp_mark, drop_flag)
+or prepare_display_buf() refuses it, vf_pre_count stays 0, and on a flush
+output_pic_display()'s do { output_pic() } while (pic) takes the same
+picture forever, in the decoder's threaded ISR.
+
+On an AM9 Pro (S6) a Dolby Vision FEL enhancement-layer instance started
+at the base layer's 3840x2160, changed to 1920x1088 on its first I frame,
+and its flush looped: "VH265: output first frame poc 146" ~700,000 times,
+irq/54 at 98% CPU. Closing the decoder then waits in vdec_free_irq() ->
+synchronize_irq() for that thread, so Kodi's VideoPlayer thread sits in D
+state, Kodi stops answering, and only a power cycle recovers the box. The
+same storm ended a wedge on 2026-10-12.
+
+Take only a picture with output_mark set, and bound output_pic_display()
+at two passes per picture slot, logging if that bound is ever hit.
+
+---
+--- a/drivers/frame_provider/decoder/h265/vh265.c
++++ b/drivers/frame_provider/decoder/h265/vh265.c
+@@ -4510,7 +4510,19 @@
+ 				continue;
+ 			if (pic->output_mark)
+ 				num_pic_not_yet_display++;
+-			if (pic->slice_type == 2 &&
++			/*
++			 * Only a picture still waiting for output: one already
++			 * handed out or recycled (error/nodisp/drop, or refused by
++			 * prepare_display_buf) leaves vf_pre_count at 0, and taking
++			 * it again here made output_pic_display() loop forever in
++			 * the ISR thread on a flush - a Dolby Vision enhancement
++			 * layer started at the base layer's size, then its
++			 * resolution change ("output first frame poc 146" ~700k
++			 * times), with vdec_free_irq() waiting on it and the box
++			 * needing a power cycle.
++			 */
++			if (pic->output_mark &&
++				pic->slice_type == 2 &&
+ 				hevc->vf_pre_count == 0 &&
+ 				fast_output_enable & 0x1) {
+ 				/*fast output for first I picture*/
+@@ -4594,8 +4606,18 @@
+ void output_pic_display(struct hevc_state_s *hevc, unsigned char flush_flag, bool ones)
+ {
+ 	struct PIC_s *pic_display = NULL;
++	/* each pass hands out or recycles one picture: more passes than
++	 * there are pictures is a picture handed out twice, so stop rather
++	 * than spin in the ISR thread */
++	int passes = 0;
+ 
+ 	do {
++		if (++passes > 2 * MAX_REF_PIC_NUM) {
++			hevc_print(hevc, 0,
++				"%s: output loop bound hit (poc %d) - stopping\n",
++				__func__, pic_display ? pic_display->POC : -1);
++			break;
++		}
+ 		pic_display = output_pic(hevc, flush_flag);
+ 
+ 		if (pic_display) {

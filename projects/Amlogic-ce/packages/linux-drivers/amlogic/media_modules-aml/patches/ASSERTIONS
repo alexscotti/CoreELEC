@@ -24,3 +24,7 @@ drivers/frame_provider/decoder/utils/vdec.c:		timeout = jiffies + HZ / 10;:1
 # --- 9003: a legacy (single) decoder stops its VLD stream fetch before the DMC port closes ---
 drivers/frame_provider/decoder/utils/vdec.c:vdec_single_quiesce_vld:2
 drivers/frame_provider/decoder/utils/vdec.c:vld stream fetch stopped before the dmc port closes:1
+
+# --- 9004: vh265 never re-takes an output/recycled picture as the first frame; output loop bounded ---
+drivers/frame_provider/decoder/h265/vh265.c:if (pic->output_mark &&:1
+drivers/frame_provider/decoder/h265/vh265.c:output loop bound hit:1

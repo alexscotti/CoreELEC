@@ -119,6 +119,12 @@ LIVE_BITRATE = {
     "MediaVideoPropVar": "$INFO[Player.Process(videolivebitrate), \u2022 ]",
     "MediaAudioPropVar": "$INFO[Player.Process(audiolivebitrate), \u2022 ]",
 }
+# Read-ahead cache state, appended to the same line as the live bitrate and
+# by the same rule. Player.Process(readahead) is empty unless the playing
+# stream actually has a cache, so with read-ahead off the line is unchanged.
+READ_AHEAD = {
+    "MediaVideoPropVar": "$INFO[Player.Process(readahead), \u2022 ]",
+}
 PLAYING = "Window.IsActive(fullscreenvideo)"
 KODI_ASPECT = "$INFO[VideoPlayer.VideoAspect, \u2022 ,:1]"
 OUR_ASPECT = "$INFO[Skin.String(%s), \u2022 ]" % ASPECT_STRING
@@ -280,6 +286,10 @@ def patch_variables(data):
                 continue
             if name == MEDIA_PROP_VAR and KODI_ASPECT in value.text:
                 value.text = value.text.replace(KODI_ASPECT, OUR_ASPECT)
+            # Read-ahead goes on BEFORE the bitrate, so the format line still
+            # ends in the live bitrate as test_live_bitrates requires.
+            if name in READ_AHEAD and PLAYING in (value.get("condition") or ""):
+                value.text += READ_AHEAD[name]
             if name in LIVE_BITRATE and PLAYING in (value.get("condition") or ""):
                 value.text += LIVE_BITRATE[name]
     return _serialize(root)

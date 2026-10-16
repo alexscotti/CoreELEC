@@ -106,6 +106,27 @@ def _anims(root):
     return [a for a in wrapper.findall("animation")]
 
 
+def test_variables_carry_the_readahead_on_the_playing_line_only():
+    """The read-ahead figure rides the same line as the live bitrate, and only
+    on the fullscreenvideo branch - a list row must not grow a cache readout."""
+    out = ks.patch_variables(_stock()[ks.VARIABLES_XML])
+    root = ET.fromstring(out)
+    playing = other = None
+    for var in root.iter("variable"):
+        if var.get("name") != ks.MEDIA_PROP_VAR:
+            continue
+        for value in var.findall("value"):
+            if ks.PLAYING in (value.get("condition") or ""):
+                playing = value.text
+            elif not value.get("condition"):
+                other = value.text
+    assert playing is not None, "no fullscreenvideo branch in %s" % ks.MEDIA_PROP_VAR
+    assert ks.READ_AHEAD[ks.MEDIA_PROP_VAR] in playing, "read-ahead missing from the playing line"
+    if other:
+        assert "Player.Process(readahead)" not in other, "read-ahead leaked onto a list row"
+    return True
+
+
 def test_patch_moves_every_control():
     root = ET.fromstring(ks.patch_window(WINDOW, -1))
     controls = root.find("controls")
@@ -423,6 +444,7 @@ TESTS = [
     ("Wrapper vanishes when the window closes", test_wrapper_repeats_window_conditions),
     ("Select dialog shrinks into the picture", test_select_dialog_fits_the_picture),
     ("Info panel removed from the seek bar only", test_info_panel_removed),
+    ("Read-ahead rides the playing line only", test_variables_carry_the_readahead_on_the_playing_line_only),
     ("File-name title shows the database title", test_file_name_title_replaced),
     ("Format line shows the film's aspect", test_format_line_aspect),
     ("Symphony OSD window", test_osd_window),

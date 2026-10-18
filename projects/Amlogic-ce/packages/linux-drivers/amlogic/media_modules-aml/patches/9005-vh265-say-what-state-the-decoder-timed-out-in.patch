@@ -1,0 +1,45 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: vh265: say what state the decoder timed out in
+
+timeout_process() logs only HEVC_MPC_E, which does not say which of the two
+timeout paths fired, and they mean opposite things.
+
+The watchdog runs at decode_timeout_val (200ms). When dec_status is
+HEVC_CODED_SLICE_SEGMENT_DAT it compares the LCU decode position against the
+previous sample: real progress calls restart_process_time() and it takes two
+strikes to fire, so firing there means the decoder genuinely stopped mid-slice.
+Every OTHER state fires IMMEDIATELY at 200ms with no progress check and no
+strike count - including, as far as the register values go, a decoder that is
+simply waiting for input that has not arrived yet.
+
+That distinction decides whether a timeout is a stuck decoder or a starved one,
+and on this rig the timeouts were seen only under heavy trick play on SMB
+sources, where input starvation after a seek is expected. Guessing between the
+two from HEVC_MPC_E alone is not possible, so log the terms: the decoder status
+word, the LCU index then and now, how long the window actually ran, and the
+slice count.
+
+Diagnostic only - no behaviour change.
+
+---
+--- a/drivers/frame_provider/decoder/h265/vh265.c
++++ b/drivers/frame_provider/decoder/h265/vh265.c
+@@ -13760,8 +13760,16 @@
+ 
+ static void timeout_process(struct hevc_state_s *hevc)
+ {
+-	hevc_print(hevc, 0, "%s decoder timeout HEVC_MPC_E=0x%x\n",
+-		__func__, READ_VREG(HEVC_MPC_E));
++	hevc_print(hevc, 0,
++		"%s decoder timeout HEVC_MPC_E=0x%x dec_status=0x%x "
++		"lcu_was=%d lcu_now=%d elapsed=%ums slices=%d\n",
++		__func__, READ_VREG(HEVC_MPC_E),
++		READ_VREG(HEVC_DEC_STATUS_REG),
++		hevc->last_lcu_idx,
++		READ_VREG(HEVC_PARSER_LCU_START) & 0xffffff,
++		hevc->start_process_time ?
++			(u32)(1000 * (jiffies - hevc->start_process_time) / HZ) : 0,
++		hevc->slice_count);
+ 
+ 	reset_process_time(hevc);
+ 

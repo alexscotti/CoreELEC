@@ -1,0 +1,37 @@
+Expose the playitem's start source-packet number on BLURAY_CLIP_INFO.
+
+A playlist may place several consecutive playitems in ONE clip file, each with
+its own IN/OUT time range. libbluray already resolves each playitem's range to
+packet numbers - navigation.c computes clip->start_pkt and clip->end_pkt with
+clpi_lookup_spn() when it builds the NAV_CLIP - and bluray.c already reads both
+to fill ci->pkt_count. Only the difference is published, so a player can learn
+how LONG a playitem is but not WHERE it begins.
+
+A player that reads ahead needs the where. When the next playitem is in the
+same file, the boundary is not an EOF and not a file open: it is a seek to
+that playitem's first source packet. bluray.c uses exactly this value for the
+same purpose internally (st->clip_pos = clip->start_pkt * 192).
+
+Purely additive: one field appended to the struct beside connection_condition,
+assigned from the NAV_CLIP the fill site already has in hand.
+
+--- a/src/libbluray/bluray.h	2026-10-17 11:29:40
++++ b/src/libbluray/bluray.h	2026-10-17 11:30:05
+@@ -286,6 +286,7 @@
+     uint64_t           out_time;    /**< end timestamp, 90kHz */
+     char               clip_id[6];  /**< Clip identifier (.m2ts file name) */
+     uint8_t            connection_condition;    /**< MPLS playitem connection_condition: 5/6 seamless, 1 non-seamless */
++    uint32_t           start_pkt;               /**< Source packet number of the playitem's first packet in the clip */
+ } BLURAY_CLIP_INFO;
+ 
+ /** Chapter entry */
+--- a/src/libbluray/bluray.c	2026-10-17 11:29:40
++++ b/src/libbluray/bluray.c	2026-10-17 11:30:05
+@@ -3246,6 +3246,7 @@
+ 
+             memcpy(ci->clip_id, pi->clip->clip_id, sizeof(ci->clip_id));
+             ci->pkt_count = nc->end_pkt - nc->start_pkt;
++            ci->start_pkt = nc->start_pkt;
+             ci->start_time = (uint64_t)nc->title_time * 2;
+             ci->in_time = (uint64_t)pi->in_time * 2;
+             ci->out_time = (uint64_t)pi->out_time * 2;

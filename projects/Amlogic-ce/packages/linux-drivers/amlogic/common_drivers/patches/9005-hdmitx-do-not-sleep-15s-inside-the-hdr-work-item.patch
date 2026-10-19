@@ -1,0 +1,144 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: hdmitx: do not sleep 1.5s inside the HDR work item
+
+hdr_work_func() sends a zero DRM infoframe on an HDR->SDR transition and then
+calls msleep(1500) before disabling the DRM packets. It runs as a plain
+work_struct (work_hdr), queued with schedule_work() from five call sites, so
+that sleep holds the one work item - and a shared system_wq worker - for a
+second and a half.
+
+A 3D title is 1080P23.975 3D-FP 444 BT709 8b SDR, so starting one from the 4K
+HDR-capable GUI always takes the HDR->SDR path. When a previous transition is
+still inside the msleep, the mode and DRM updates belonging to the start of the
+film queue behind it and the picture stops.
+
+Measured on an AM9 Pro over 15 plays of Avatar/3D Atmos, judged by the kernel
+presentation trace: 8 lost frames, every one with THREE "vinfo: set
+cur_enc_ppc" applies against two on each clean play. The gap is 1519-1654ms
+plus ~390ms as the queued updates drain, and it lands 5-9s into the film:
+
+    19566.7035  HDMITX_HPD_PLUGOUT
+    19566.7042  hdmitx_set_drm_pkt: disable drm pkt
+                <- 1.52s, nothing presented ->
+    19568.2246  hdmitx_set_drm_pkt: HDR->SDR
+    19568.2248  hdr_work_func: send zero DRM
+    19568.5180  hdmitx_set_drm_pkt: disable drm pkt
+
+"send zero DRM" appears AFTER the gap, so the gap is the PREVIOUS invocation's
+sleep rather than this one's. hpd_state polled at 20Hz read low for
+1.50/1.51/1.57s - the constant, not a negotiation on the wire.
+
+So wait without holding the work item: send the zero DRM, then re-arm the
+disable step as a delayed work 1.5s later. The re-checks the old code made
+after waking are what the delayed callback evaluates, so they move across
+unchanged, and a transition arriving meanwhile re-arms the timer (mod_delayed_
+work) instead of queueing behind a sleep.
+
+Only hdmitx21 is touched: the AM9 (S6) uses it, per hdmitx21_meson_init720 and
+hdmitx21_video_mute_op in its log. hdmitx20 carries the same msleep and would
+need the same change if a 20-series board ever shows this.
+
+---
+--- drivers/media/vout/hdmitx21/hdmi_tx_module.h	2026-10-19 04:16:27.006660007 +0000
++++ drivers/media/vout/hdmitx21/hdmi_tx_module.h	2026-10-19 04:16:27.043660007 +0000
+@@ -135,6 +135,10 @@
+ 	struct delayed_work work_internal_intr;
+ 	struct work_struct work_hdr;
+ 	struct work_struct work_hdr_unmute;
++	/* the 1.5s wait before the DRM packets are disabled, as a delayed
++	 * work: sleeping inside work_hdr blocked the next film's mode set
++	 */
++	struct delayed_work work_hdr_disable;
+ 	struct delayed_work work_start_hdcp;
+ 	struct vrr_device_s hdmitx_vrr_dev;
+ 	void *am_hdcp;
+--- drivers/media/vout/hdmitx21/hdmi_tx_main.c	2026-10-19 04:16:27.006660007 +0000
++++ drivers/media/vout/hdmitx21/hdmi_tx_main.c	2026-10-19 04:16:27.045660007 +0000
+@@ -812,6 +812,43 @@
+ 		hdmitx_hw_cntl_config(&hdev->tx_hw.base, CONF_VIDEO_MUTE_OP, VIDEO_UNMUTE);
+ 	}
+ }
++/* the second half of hdr_work_func, 1.5s later. It used to be an msleep()
++ * inside hdr_work_func, which held that work item - and a system_wq worker -
++ * for 1.5s, so the mode and DRM updates belonging to the start of the next
++ * film queued behind it and the picture stopped (measured: 8 of 15 3D plays
++ * lost 1519-1654ms of frames, each with a third "set cur_enc_ppc" apply).
++ */
++static void hdr_disable_work_func(struct work_struct *work)
++{
++	struct hdmitx_dev *hdev =
++		container_of(to_delayed_work(work), struct hdmitx_dev,
++			     work_hdr_disable);
++
++	/*
++	 * disable DRM packets completely ONLY if hdr transfer
++	 * feature and color feature still demand SDR.
++	 */
++	if (hdr_status_pos == 4) {
++		/* zero hdr10+ VSIF being sent - disable it */
++		HDMITX_INFO("%s: disable hdr10+ vsif\n", __func__);
++		/* hdmi_vend_infoframe_set(NULL); */
++		hdmi_vend_infoframe_rawset(NULL, NULL);
++		hdr_status_pos = 0;
++	}
++	if (hdev->hdr_transfer_feature == T_BT709 &&
++	    hdev->hdr_color_feature == C_BT709) {
++		/* update hdr mode flag */
++		hdev->tx_comm.hdmi_current_hdr_mode = 0;
++		hdev->tx_comm.hdmi_last_hdr_mode = hdev->tx_comm.hdmi_current_hdr_mode;
++		hdmitx_sdr_hdr_uevent(hdev);
++	} else {
++		HDMITX_INFO("%s: tf=%d, cf=%d\n",
++			__func__,
++			hdev->hdr_transfer_feature,
++			hdev->hdr_color_feature);
++	}
++}
++
+ static void hdr_work_func(struct work_struct *work)
+ {
+ 	struct hdmitx_dev *hdev =
+@@ -824,32 +861,9 @@
+ 		hdmi_drm_infoframe_init(info);
+ 		hdmi_drm_infoframe_set(info);
+ 		hdmi_avi_infoframe_config(CONF_AVI_BT2020, hdev->colormetry);
+-
+-		/* delay 1.5s */
+-		msleep(1500);
+-		/*
+-		 * disable DRM packets completely ONLY if hdr transfer
+-		 * feature and color feature still demand SDR.
+-		 */
+-		if (hdr_status_pos == 4) {
+-			/* zero hdr10+ VSIF being sent - disable it */
+-			HDMITX_INFO("%s: disable hdr10+ vsif\n", __func__);
+-			/* hdmi_vend_infoframe_set(NULL); */
+-			hdmi_vend_infoframe_rawset(NULL, NULL);
+-			hdr_status_pos = 0;
+-		}
+-		if (hdev->hdr_transfer_feature == T_BT709 &&
+-		    hdev->hdr_color_feature == C_BT709) {
+-			/* update hdr mode flag */
+-			hdev->tx_comm.hdmi_current_hdr_mode = 0;
+-			hdev->tx_comm.hdmi_last_hdr_mode = hdev->tx_comm.hdmi_current_hdr_mode;
+-			hdmitx_sdr_hdr_uevent(hdev);
+-		} else {
+-			HDMITX_INFO("%s: tf=%d, cf=%d\n",
+-				__func__,
+-				hdev->hdr_transfer_feature,
+-				hdev->hdr_color_feature);
+-		}
++		/* was msleep(1500) here; see hdr_disable_work_func */
++		mod_delayed_work(system_wq, &hdev->work_hdr_disable,
++				 msecs_to_jiffies(1500));
+ 	} else {
+ 		hdmitx_sdr_hdr_uevent(hdev);
+ 	}
+@@ -4980,6 +4994,7 @@
+ 	get_hdmi_efuse(tx_comm);
+ 	spin_lock_init(&hdev->tx_comm.edid_spinlock);
+ 	INIT_WORK(&hdev->work_hdr, hdr_work_func);
++	INIT_DELAYED_WORK(&hdev->work_hdr_disable, hdr_disable_work_func);
+ 	INIT_WORK(&hdev->work_hdr_unmute, hdr_unmute_work_func);
+ 	hdev->hdmi_hpd_wq = alloc_ordered_workqueue(DEVICE_NAME,
+ 		WQ_HIGHPRI | __WQ_LEGACY | WQ_MEM_RECLAIM);

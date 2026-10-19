@@ -1,0 +1,34 @@
+--- a/drivers/media/vout/hdmitx21/hw/interrupts.c
++++ b/drivers/media/vout/hdmitx21/hw/interrupts.c
+@@ -298,7 +298,8 @@
+ 			hdmitx_hpd_irq_top_half_process(hdev, true);
+ 			ret = queue_delayed_work(hdev->hdmi_hpd_wq,
+ 				&hdev->work_hpd_plugin,
+-				hdev->pxp_mode ? 0 : HZ / 2);
++				hdev->pxp_mode ? 0 :
++				msecs_to_jiffies(hpd_plugin_delay_ms));
+ 			if (!ret)
+ 				HDMITX_DEBUG("HDMI plugin work is already in the queue\n");
+ 		}
+@@ -434,6 +435,21 @@
+ 	}
+ }
+ 
++/* How long to debounce HPD before acting on a plug-in.
++ *
++ * Upstream waits HZ/2. That half second is pure added blackout whenever a
++ * sink pulses HPD cleanly, which is what the AVR on this rig does a few
++ * seconds into playback: measured, HPD is low for ~1.0s but the picture does
++ * not come back for ~1.5s, and the difference is this delay. Contact bounce
++ * on a real plug settles well inside 100ms, so default to that - and keep it
++ * writable so the value can be compared on a running box instead of costing
++ * a kernel build per experiment.
++ */
++static uint hpd_plugin_delay_ms = 100;
++module_param(hpd_plugin_delay_ms, uint, 0644);
++MODULE_PARM_DESC(hpd_plugin_delay_ms,
++		 "ms to debounce HPD before the plug-in work runs (upstream: 500)");
++
+ static irqreturn_t intr_handler(int irq, void *dev)
+ {
+ 	unsigned int top_intr_state;

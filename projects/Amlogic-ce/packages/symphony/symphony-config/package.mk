@@ -2,7 +2,7 @@
 # Copyright (C) 2026-present Alex Scotti
 
 PKG_NAME="symphony-config"
-PKG_VERSION="1.0"
+PKG_VERSION="1.1"
 PKG_LICENSE="GPL-2.0-only"
 PKG_SITE="https://github.com/alexscotti/CoreELEC"
 PKG_URL=""
@@ -49,6 +49,18 @@ PKG_TOOLCHAIN="manual"
 # modes 3D switches into) and the audiooutput devices (the AM9 Pro's ALSA
 # names). A different display or box needs them re-read.
 #
+# symphony-userdata-merge runs after the copy and puts back any setting of
+# ours that is MISSING from a guisettings.xml that already exists - the case
+# cp -iRp cannot help with, where the file is there but has been emptied by a
+# reset. A setting the box already carries is never touched. Its tests are
+# scripts/test_symphony_userdata_merge.py beside it.
+#
+# safemode.disable turns off Kodi's crash-loop safe mode, which renames
+# /storage/.kodi aside and reboots. It fires after symphony-userdata.service
+# has already placed our guisettings.xml, so it would strand the box on a
+# default profile with no webserver and no JSON-RPC; the file itself says why
+# at more length.
+#
 # services.deviceuuid is deliberately absent: Kodi generates one per box
 # rather than every box cloning the one the tarball was captured from.
 makeinstall_target() {
@@ -62,6 +74,10 @@ makeinstall_target() {
   cp -a ${PKG_DIR}/config/usr-cache/.     ${INSTALL}/usr/cache/
   cp -a ${PKG_DIR}/config/userdata/.      ${INSTALL}/usr/share/symphony/userdata/
   chmod +x ${INSTALL}/usr/config/autostart.sh
+
+  mkdir -p ${INSTALL}/usr/lib/symphony
+  cp ${PKG_DIR}/scripts/symphony-userdata-merge ${INSTALL}/usr/lib/symphony/
+  chmod +x ${INSTALL}/usr/lib/symphony/symphony-userdata-merge
 
   cp ${PKG_DIR}/units/symphony-userdata.service ${INSTALL}/usr/lib/systemd/system/
   # sysinit.target, matching its WantedBy and the two hooks it sits beside

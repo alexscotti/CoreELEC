@@ -20,6 +20,11 @@ Before=kodi.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/sh -c 'mkdir -p /storage/.kodi/userdata && false | cp -iRp /usr/share/symphony/userdata/* /storage/.kodi/userdata/ &>/dev/null; exit 0'
+# ...and then put back any of our settings that an existing guisettings.xml has
+# lost. cp -iRp skips a file that is already there, so a profile emptied by a
+# reset keeps Kodi's defaults - no webserver, no JSON-RPC, none of this rig's
+# display or audio settings.
+ExecStart=/usr/lib/symphony/symphony-userdata-merge
 
 [Install]
 WantedBy=sysinit.target

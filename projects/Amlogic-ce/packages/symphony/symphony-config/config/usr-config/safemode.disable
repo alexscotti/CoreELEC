@@ -1,0 +1,19 @@
+Kodis crash-loop "safe mode" is off on this box.
+
+kodi.sh counts restarts (KODI_MAX_RESTARTS inside KODI_MAX_SECONDS) and, on a
+loop, writes SAFE to .config/boot.status; kodi-safe-mode then renames
+/storage/.kodi to /storage/.kodi.FAILED and reboots, so Kodi comes up on an
+empty profile. That cure is worse than the disease here:
+
+  - the rename happens AFTER symphony-userdata.service has already copied our
+    guisettings.xml into /storage/.kodi/userdata, so the box loses all 30 of
+    this rigs settings for that boot - including services.webserver, which
+    Kodi will not start on a default profile (authentication defaults on with
+    no password), leaving no JSON-RPC for the Symphony driver;
+  - a transient crash loop (one bad disc, a decoder wedge) is enough to
+    trigger it, and it also takes the library db, watched state and addon
+    data with it;
+  - the A/B slots and the relay power-cycle are the recovery path for a box
+    that will not start, and neither of them destroys the profile.
+
+kodi.sh checks only that this file exists; its contents are a comment.

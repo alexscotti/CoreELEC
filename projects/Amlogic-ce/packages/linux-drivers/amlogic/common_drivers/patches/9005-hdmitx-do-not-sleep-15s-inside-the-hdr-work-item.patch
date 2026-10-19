@@ -39,8 +39,8 @@ hdmitx21_video_mute_op in its log. hdmitx20 carries the same msleep and would
 need the same change if a 20-series board ever shows this.
 
 ---
---- drivers/media/vout/hdmitx21/hdmi_tx_module.h	2026-10-19 04:16:27.006660007 +0000
-+++ drivers/media/vout/hdmitx21/hdmi_tx_module.h	2026-10-19 04:16:27.043660007 +0000
+--- a/drivers/media/vout/hdmitx21/hdmi_tx_module.h
++++ b/drivers/media/vout/hdmitx21/hdmi_tx_module.h
 @@ -135,6 +135,10 @@
  	struct delayed_work work_internal_intr;
  	struct work_struct work_hdr;
@@ -52,8 +52,8 @@ need the same change if a 20-series board ever shows this.
  	struct delayed_work work_start_hdcp;
  	struct vrr_device_s hdmitx_vrr_dev;
  	void *am_hdcp;
---- drivers/media/vout/hdmitx21/hdmi_tx_main.c	2026-10-19 04:16:27.006660007 +0000
-+++ drivers/media/vout/hdmitx21/hdmi_tx_main.c	2026-10-19 04:16:27.045660007 +0000
+--- a/drivers/media/vout/hdmitx21/hdmi_tx_main.c
++++ b/drivers/media/vout/hdmitx21/hdmi_tx_main.c
 @@ -812,6 +812,43 @@
  		hdmitx_hw_cntl_config(&hdev->tx_hw.base, CONF_VIDEO_MUTE_OP, VIDEO_UNMUTE);
  	}

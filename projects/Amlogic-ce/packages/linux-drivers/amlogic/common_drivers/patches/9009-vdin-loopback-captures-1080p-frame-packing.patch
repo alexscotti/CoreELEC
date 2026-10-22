@@ -1,0 +1,29 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: vdin: the VPP loopback can capture 1080p frame packing
+
+The VIU1 write-back loopback (vdin1, /dev/video71) picks its capture format
+from the current vout's size, and knows only 4096/3840x2160, 1920x1080 and
+1280x720. Under HDMI frame packing the vout is 1920x2205 (both eyes and the
+45-line active space; vinfo reads 1080p24hz 1920x2205 on the AM9 Pro), so it
+fell through to TVIN_SIG_FMT_NULL and STREAMON failed with "invalid fmt", on
+every input: nothing could capture what a 3D Blu-ray actually sends.
+
+Map 1920x2205 to TVIN_SIG_FMT_HDMI_1920X1080P_24HZ_FRAME_PACKING, whose table
+entry is exactly that active size, so the packed frame - VD1, VD2 and the OSD,
+blended - can be captured like any other output. Symphony uses it to check
+where each eye lands when the picture is shifted vertically.
+---
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -2040,6 +2040,11 @@
+ 	else if (h >= 1920 - err_range && h <= 1920 + err_range &&
+ 			 v >= 1080 - err_range && v <= 1080 + err_range)
+ 		devp->parm.info.fmt = TVIN_SIG_FMT_HDMI_1920X1080P_60HZ;
++	/* 1080p frame packing: both eyes and the active space, 1920x2205 */
++	else if (h >= 1920 - err_range && h <= 1920 + err_range &&
++			 v >= 2205 - err_range && v <= 2205 + err_range)
++		devp->parm.info.fmt =
++			TVIN_SIG_FMT_HDMI_1920X1080P_24HZ_FRAME_PACKING;
+ 	else if (h >= 1280 - err_range && h <= 1280 + err_range &&
+ 			 v >= 720 - err_range && v <= 720 + err_range)
+ 		devp->parm.info.fmt = TVIN_SIG_FMT_HDMI_1280X720P_60HZ;

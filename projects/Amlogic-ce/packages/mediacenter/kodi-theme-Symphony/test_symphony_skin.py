@@ -102,8 +102,46 @@ def _stock():
 
 
 def _anims(root):
+    """The wrapper's INSET animations."""
     wrapper = root.find("controls")[0]
-    return [a for a in wrapper.findall("animation")]
+    return [a for a in wrapper.findall("animation")
+            if ks.INSET_STRING in a.get("condition", "")]
+
+
+def _shift_anims(root):
+    wrapper = root.find("controls")[0]
+    return [a for a in wrapper.findall("animation")
+            if ks.SHIFT_STRING in a.get("condition", "")]
+
+
+def test_every_window_follows_the_shift():
+    """symphony_shift slides every patched window DOWN by its value -- top,
+    bottom and fit alike -- only while a film plays, on the inset grid, with
+    no condition for 0."""
+    files = ks.build(_stock())
+    names = list(ks.WINDOWS) + [ks.OSD_WINDOW_FILE]
+    for name in names:
+        anims = _shift_anims(ET.fromstring(files[name]))
+        if len(anims) != ks.INSET_MAX // ks.INSET_STEP:
+            return False
+        for a in anims:
+            v = int(a.get("condition").rsplit(",", 1)[1].rstrip(")"))
+            if (a.get("effect") != "slide" or a.get("end") != "0,%d" % v
+                    or v <= 0 or a.get("time") != "0" or a.text != "Conditional"
+                    or not a.get("condition").startswith("Player.HasVideo + ")):
+                return False
+    return True
+
+
+def test_shift_comes_before_the_inset():
+    """Kodi composes a control's animations first-outermost: the shift must
+    be listed first so a fitted pick list is shrunk, then moved."""
+    root = ET.fromstring(ks.build(_stock())["xml/DialogSelect.xml"])
+    conds = [a.get("condition", "") for a in
+             root.find("controls")[0].findall("animation")]
+    last_shift = max(i for i, c in enumerate(conds) if ks.SHIFT_STRING in c)
+    first_inset = min(i for i, c in enumerate(conds) if ks.INSET_STRING in c)
+    return last_shift < first_inset
 
 
 def test_variables_carry_the_readahead_on_the_playing_line_only():
@@ -442,6 +480,8 @@ TESTS = [
     ("Paused tuck removed, bar stays", test_paused_tuck_removed),
     ("Inward and non-hide slides untouched", test_inward_slides_untouched),
     ("Wrapper vanishes when the window closes", test_wrapper_repeats_window_conditions),
+    ("Every window follows the picture shift", test_every_window_follows_the_shift),
+    ("Shift is composed outside the inset", test_shift_comes_before_the_inset),
     ("Select dialog shrinks into the picture", test_select_dialog_fits_the_picture),
     ("Info panel removed from the seek bar only", test_info_panel_removed),
     ("Read-ahead rides the playing line only", test_variables_carry_the_readahead_on_the_playing_line_only),

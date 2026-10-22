@@ -28,6 +28,16 @@ aspect (theater mach/base/drivers/kodi_skin.py, inset_for), so a 16:9 film
 gets 0 and the stock layout. That module and this one must agree on the skin
 string names and the inset grid (INSET_STEP, INSET_MAX): change both together.
 
+When Symphony's aspect control has this player move the picture DOWN inside
+the frame (theater mach/aspect/PLAN_player_shift.md: one base lens memory per
+lens zoom, the rest of each aspect's shift done by Kodi's view mode), the
+overlays must follow it. The driver sets `symphony_shift` (skin pixels, same
+grid, 0 = none) and every patched window also slides down by it, while a film
+plays. The shift slides come BEFORE the inset animations on the wrapper: Kodi
+composes a control's animations in list order with the first outermost, so the
+pick lists are shrunk about the centre first and then moved, rather than
+having their move shrunk too.
+
 Why a patch and not a checked-in skin: generated from the build's own Estuary,
 the skin always matches the Kodi it ships with. The edits are made by XML
 STRUCTURE (the <controls> element), not a text diff, so Estuary reshuffling
@@ -48,6 +58,7 @@ STOCK_ID = "skin.estuary"
 SKIN_ID = "skin.estuary.symphony"
 SKIN_NAME = "Estuary (Symphony)"
 INSET_STRING = "symphony_inset"
+SHIFT_STRING = "symphony_shift"
 TITLE_STRING = "symphony_title"
 ASPECT_STRING = "symphony_aspect"
 OSD_STRING = "symphony_osd"
@@ -243,6 +254,16 @@ def patch_window(data, direction, name="window"):
         vis = ET.SubElement(wrapper, "visible")
         vis.text = cond.text
         vis.tail = "\n"
+    # Follow the picture's shift: down, for every window, only while a film
+    # plays (the string outlives the film, like the inset).
+    for v in range(INSET_STEP, INSET_MAX + 1, INSET_STEP):
+        cond = "Player.HasVideo + String.IsEqual(Skin.String(%s),%d)" % (
+            SHIFT_STRING, v)
+        anim = ET.SubElement(wrapper, "animation", {
+            "effect": "slide", "start": "0,0", "end": "0,%d" % v,
+            "time": "0", "condition": cond})
+        anim.text = "Conditional"
+        anim.tail = "\n"
     for v in range(INSET_STEP, INSET_MAX + 1, INSET_STEP):
         cond = "String.IsEqual(Skin.String(%s),%d)" % (INSET_STRING, v)
         if direction == FIT:

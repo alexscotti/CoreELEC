@@ -147,3 +147,6 @@ drivers/media/video_sink/video_hw.c:dispbuf->left_eye.height - 1;:1
 # --- 9004: frame-packed 3D, OSD planes clip to the packed output height ---
 drivers/drm/meson_plane.c:vinfo->info_3d == FP_3D &&:1
 drivers/drm/meson_plane.c:if ((plane_info->dst_y + plane_info->dst_h) > vlimit) {:1
+
+# --- 9009: the VPP loopback captures 1080p frame packing ----------------------
+drivers/media/vin/tvin/vdin/vdin_v4l2_if.c:			TVIN_SIG_FMT_HDMI_1920X1080P_24HZ_FRAME_PACKING;:1

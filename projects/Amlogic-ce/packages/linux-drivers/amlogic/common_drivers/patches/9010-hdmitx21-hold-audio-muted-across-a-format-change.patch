@@ -1,6 +1,6 @@
 --- a/drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c
 +++ b/drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c
-@@ -1964,8 +1964,35 @@
+@@ -1964,7 +1964,45 @@
  	}
  	HDMITX_INFO("audio state: %s\n", flag == 0 ? "AUDIO_MUTE" : "AUDIO_UNMUTE");
  	mutex_unlock(&aud_mutex);
@@ -21,6 +21,17 @@
 +module_param(aud_fmt_settle_ms, uint, 0644);
 +MODULE_PARM_DESC(aud_fmt_settle_ms, "ms HDMI audio stays muted after a format change (0: off)");
 +
++/* 1: also settle a reconfigure that keeps the type. The sound driver
++ * re-prepares the current PCM path just before it swaps to the bitstream one
++ * (2163.525 PCM, i2s feed released 4ms later, AC-3 at 2163.573); unmuting that
++ * re-prepare puts ~50ms of an unfed i2s path on the wire - the suspected loud
++ * burst before 10 Cloverfield Lane's main menu, which a type-change-only settle
++ * did not remove. 0: settle only on a type change.
++ */
++static uint aud_fmt_settle_any = 1;
++module_param(aud_fmt_settle_any, uint, 0644);
++MODULE_PARM_DESC(aud_fmt_settle_any, "settle every audio reconfigure, not only a type change");
++
 +static int aud_last_type = -1;
 +
 +static void aud_settle_fn(struct work_struct *work)
@@ -30,18 +41,18 @@
 +	HDMITX_INFO("audio format settled, unmute allowed\n");
 +	audio_mute_op(hdev->tx_comm.cur_audio_param.aud_output_en);
  }
- 
-+static DECLARE_DELAYED_WORK(aud_settle_work, aud_settle_fn);
 +
++static DECLARE_DELAYED_WORK(aud_settle_work, aud_settle_fn);
+ 
  struct aud_para hdmi21aud_config_data;
  static int hdmitx_set_audmode(struct hdmitx_hw_common *tx_hw, struct aud_para *audio_param)
- {
-@@ -2139,7 +2166,16 @@
+@@ -2139,7 +2177,17 @@
  		hdmitx_hw_cntl_misc(tx_hw, MISC_AUDIO_RESET, 1);
  	hdmitx21_set_reg_bits(AIP_RST_IVCTX, 0, 0, 1);
  	mutex_unlock(&aud_mutex);
 -	audio_mute_op(audio_param->aud_output_en);
-+	if (aud_fmt_settle_ms && audio_param->type != aud_last_type) {
++	if (aud_fmt_settle_ms &&
++	    (aud_fmt_settle_any || audio_param->type != aud_last_type)) {
 +		HDMITX_INFO("audio format %d -> %d, muted %ums\n",
 +			aud_last_type, audio_param->type, aud_fmt_settle_ms);
 +		audio_mute_op(0);

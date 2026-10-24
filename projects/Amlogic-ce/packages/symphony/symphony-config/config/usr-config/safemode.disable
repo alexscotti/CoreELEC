@@ -6,7 +6,7 @@ loop, writes SAFE to .config/boot.status; kodi-safe-mode then renames
 empty profile. That cure is worse than the disease here:
 
   - the rename happens AFTER symphony-userdata.service has already copied our
-    guisettings.xml into /storage/.kodi/userdata, so the box loses all 30 of
+    guisettings.xml into /storage/.kodi/userdata, so the box loses all 31 of
     this rigs settings for that boot - including services.webserver, which
     Kodi will not start on a default profile (authentication defaults on with
     no password), leaving no JSON-RPC for the Symphony driver;

@@ -40,11 +40,11 @@ PKG_TOOLCHAIN="manual"
 # bluez/samba service files (their *-defaults units recreate them), and
 # sources.xml / RssFeeds.xml / profiles.xml (kodi-config and Kodi do).
 #
-# guisettings.xml carries 30 settings. The box's own file has 460, but Kodi
+# guisettings.xml carries 31 settings. The box's own file has 460, but Kodi
 # marks 427 of them default="true" -- its own statement that the value is the
 # default and it merely wrote it out -- and re-derives them from
 # /usr/share/kodi/system/settings/*.xml in THIS image. Only what differs is
-# here. Two of the 30 are this rig's and nothing else's: videoscreen.whitelist
+# here. Two of the 31 are this rig's and nothing else's: videoscreen.whitelist
 # (mode strings from the display's EDID, including the 1080p frame-packed
 # modes 3D switches into) and the audiooutput devices (the AM9 Pro's ALSA
 # names). A different display or box needs them re-read.
@@ -60,6 +60,15 @@ PKG_TOOLCHAIN="manual"
 # has already placed our guisettings.xml, so it would strand the box on a
 # default profile with no webserver and no JSON-RPC; the file itself says why
 # at more length.
+#
+# audiooutput.streamsilence=0 ("Keep audio device alive" off; Kodi's default
+# is 1 minute). With it on, Kodi streams PCM silence wherever no audio stream
+# plays - a Blu-ray's silent menus and warnings between a TrueHD trailer and an
+# AC-3 menu. After 10 Cloverfield Lane's TrueHD trailer and ~30s of that
+# silence, the AC-3 main menu opened with ~0.5s of loud pulsed static; muting
+# only that silence, or not streaming it, removed it, and the same disc on the
+# Oppo is clean. It never applies during playback:
+# a playing stream keeps the sink open whatever the setting.
 #
 # services.deviceuuid is deliberately absent: Kodi generates one per box
 # rather than every box cloning the one the tarball was captured from.

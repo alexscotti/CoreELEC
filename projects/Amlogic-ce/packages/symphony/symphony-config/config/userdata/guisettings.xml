@@ -23,6 +23,7 @@
   <setting id="audiooutput.channels">10</setting>
   <setting id="audiooutput.passthrough">true</setting>
   <setting id="audiooutput.passthroughdevice">ALSA:hdmi:CARD=AMLAUGESOUND,DEV=0|AML-AUGESOUND</setting>
+  <setting id="audiooutput.streamsilence">0</setting>
   <setting id="powermanagement.restartplayer">false</setting>
   <setting id="powermanagement.shutdownstate">3</setting>
   <setting id="addons.updatemode">1</setting>

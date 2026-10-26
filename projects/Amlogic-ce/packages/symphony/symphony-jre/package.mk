@@ -67,7 +67,10 @@ PKG_TOOLCHAIN="manual"
 # the JRE are not read at all and are not copied in below.
 makeinstall_target() {
   local dst="${INSTALL}/usr/lib/kodi/addons/tools.jre.zulu"
-  mkdir -p ${dst} ${INSTALL}/etc/profile.d
+  mkdir -p ${dst} ${INSTALL}/etc/profile.d ${INSTALL}/usr/lib/tmpfiles.d
+
+  # The BD-J JVM's java.io.tmpdir (compiled into libbluray.so) must exist.
+  cp ${PKG_DIR}/tmpfiles.d/symphony-jre.conf ${INSTALL}/usr/lib/tmpfiles.d/
 
   cp -a $(get_build_dir jdk-${TARGET_ARCH}-zulu)/jre ${dst}
 

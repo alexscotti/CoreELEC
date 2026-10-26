@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Give Kodi's guisettings.xml every Symphony setting it does not carry yet.
+
+The settings come as fragments in /usr/share/symphony/guisettings.d/, read in
+name order: 10-symphony.xml (symphony-defaults, every Symphony build) and,
+in our own theater's build only, 50-theater.xml (symphony-config). A later
+fragment wins for an id two of them carry.
+
+- No guisettings.xml yet (a first boot, a wiped /storage): write one holding
+  every fragment's settings, plus their other elements (settinglevel). Kodi's
+  own kodi-config then finds userdata already has one and does nothing.
+- An existing file: for every setting of ours, if the live file has no
+  setting with that id at all, add ours. That is the case a plain "copy if
+  absent" cannot help with: a factory reset, a profile reset, or Kodi's own
+  crash-loop safe mode leaves a four-line guisettings.xml. A setting the box
+  already carries is never touched, whatever its value - including one
+  deliberately set back to Kodi's default, because Kodi keeps writing the id
+  out (with default="true") once it exists.
+- An unparseable live file is Kodi's to rewrite, not ours to guess at.
+"""
+
+import glob
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+FRAGMENTS = "/usr/share/symphony/guisettings.d"
+LIVE = "/storage/.kodi/userdata/guisettings.xml"
+
+
+def ids(root):
+    return {s.get("id") for s in root.findall("setting") if s.get("id")}
+
+
+def read_fragments(directory):
+    """(root attributes, {id: setting} in first-seen order, other elements)."""
+    attrib, settings, other = {}, {}, {}
+    for path in sorted(glob.glob(os.path.join(directory, "*.xml"))):
+        try:
+            root = ET.parse(path).getroot()
+        except (OSError, ET.ParseError) as e:
+            print("symphony-userdata-merge: cannot read %s: %s" % (path, e))
+            continue
+        attrib = attrib or dict(root.attrib)
+        for el in root:
+            if el.tag == "setting":
+                if el.get("id"):
+                    settings[el.get("id")] = el
+            else:
+                other[el.tag] = el
+    return attrib, settings, other
+
+
+def main(fragments=FRAGMENTS, live=LIVE):
+    attrib, ours, other = read_fragments(fragments)
+    if not ours:
+        return 0
+
+    if not os.path.exists(live):
+        root = ET.Element("settings", attrib or {"version": "2"})
+        root.extend(ours.values())
+        root.extend(other.values())
+        ET.indent(root)
+        os.makedirs(os.path.dirname(live), exist_ok=True)
+        ET.ElementTree(root).write(live, encoding="UTF-8", xml_declaration=True)
+        print("symphony-userdata-merge: wrote %s with %d setting(s)" % (live, len(ours)))
+        return 0
+
+    try:
+        tree = ET.parse(live)
+    except (OSError, ET.ParseError) as e:
+        print("symphony-userdata-merge: %s is not readable (%s), leaving it alone" % (live, e))
+        return 0
+
+    root = tree.getroot()
+    have = ids(root)
+    added = [sid for sid in ours if sid not in have]
+    if not added:
+        return 0
+    for sid in added:
+        root.append(ours[sid])
+    tree.write(live, encoding="UTF-8", xml_declaration=True)
+    print("symphony-userdata-merge: restored %d setting(s): %s" % (len(added), " ".join(added)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(*sys.argv[1:]))

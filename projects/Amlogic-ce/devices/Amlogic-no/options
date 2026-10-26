@@ -155,5 +155,15 @@
     # adds Generic itself). Empty also skips the nine board u-boots and images.
     SUBDEVICES=""
 
+  # Symphony: our own theater's build (yes) or a public one (no, the default).
+  # Every build gets the A/B slots, Host Management, the BD-J JRE, the
+  # hostname, symphony-dovi and symphony-defaults; only ours adds the
+  # Symphony skin and symphony-config (this rig's settings).
+    SYMPHONY_THEATER="${SYMPHONY_THEATER:-no}"
+    if [ "${SYMPHONY_THEATER}" = "yes" ]; then
+      SKINS+=" Symphony"
+      ADDITIONAL_PACKAGES+=" symphony-config"
+    fi
+
   # TEE supported SoC
     TEE_SOC="S928X A311D2 S905W2 S905X4 S905Y4 S905X5M S905X5 S905X5L S905Y5 S905A"

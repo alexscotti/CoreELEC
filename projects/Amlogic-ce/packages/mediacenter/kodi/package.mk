@@ -455,8 +455,14 @@ post_makeinstall_target() {
     xmlstarlet ed -L --subnode "/addons" -t elem -n "addon" -v "${DISTRO_PKG_SETTINGS_ID}" ${ADDON_MANIFEST}
   fi
   # Symphony's skin (kodi-theme-Symphony): a system add-on, so Kodi enables it on
-  # first boot and the seed can select it
-  xmlstarlet ed -L --subnode "/addons" -t elem -n "addon" -v "skin.estuary.symphony" ${ADDON_MANIFEST}
+  # first boot and our guisettings can select it. OPTIONAL, because only our
+  # theater's build (SYMPHONY_THEATER=yes) ships it: Kodi refuses to start when
+  # a required system add-on is missing (CAddonMgr::Init, LOGFATAL), and an
+  # optional one is enabled on first install all the same. Unconditional, so
+  # this package's stamp does not depend on the flag.
+  xmlstarlet ed -L --subnode "/addons" -t elem -n "addon" -v "skin.estuary.symphony" \
+                   -i "/addons/addon[text()='skin.estuary.symphony']" -t attr -n "optional" -v "true" \
+                   ${ADDON_MANIFEST}
 
   # more binaddons cross compile badness meh
   sed -e "s:INCLUDE_DIR /usr/include/kodi:INCLUDE_DIR ${SYSROOT_PREFIX}/usr/include/kodi:g" \

@@ -71,7 +71,9 @@ NAME_RE = re.compile(r'^coreelec_[0-9]+_([0-9a-f]{40}|current-[0-9]+)_aarch64_sl
 # am9slot.sh clears any dovi_<slot>.ko it finds in the slot it writes.
 BUNDLE_FILES = ('MANIFEST', 'kernel.img', 'SYSTEM', 'am9slot.sh')
 BUNDLE_IGNORED = ('dovi.ko',)
-BUNDLE_OPTIONAL = ('symphony.tar',)       # the installer unpacks it; this server never opens it
+# extra.tar: an optional extension the bundle's installer unpacks and runs
+# (am9slot.sh); this server never opens it.
+BUNDLE_OPTIONAL = ('extra.tar',)
 
 _lock = threading.Lock()          # one install/goback at a time
 _install_thread = None
@@ -121,7 +123,7 @@ def slot_info(slot):
     m = read_kv(os.path.join(FLASH, 'SLOT_%s.manifest' % slot))
     if not m:
         return None
-    return {'version': m.get('SYMPHONY_VERSION', ''),
+    return {'version': m.get('VERSION', ''),
             'build_id': m.get('BUILD_ID', ''),
             'kodi': m.get('KODI_COMMIT', ''),
             'coreelec': m.get('COREELEC_VERSION', '')}

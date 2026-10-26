@@ -59,7 +59,7 @@ echo "== slot B verified"
 def bundle(installer=STUB, sha=None, drop=None, payload=b'S' * 300000, extra=None):
     files = {'kernel.img': b'K' * 1000, 'SYSTEM': payload, 'am9slot.sh': installer}
     files.update(extra or {})
-    man = ('SYMPHONY_VERSION=%s\nBUILD_ID=%s\nCOREELEC_VERSION=cv\nam9slot_sha256=%s\n'
+    man = ('VERSION=%s\nBUILD_ID=%s\nCOREELEC_VERSION=cv\nam9slot_sha256=%s\n'
            % (VER, 'b' * 40, sha or hashlib.sha256(installer).hexdigest())).encode()
     files['MANIFEST'] = man
     if drop:
@@ -130,7 +130,7 @@ def main():
     open(cmdline, 'w').write('BOOT_IMAGE=kernel_A.img SYSTEM_IMAGE=SYSTEM_A quiet\n')
     open(os.path.join(flash, 'slot.ini'), 'w').write('ceslot=A\n')
     open(os.path.join(flash, 'SLOT_A.manifest'), 'w').write(
-        'SYMPHONY_VERSION=%s\nBUILD_ID=%s\nKODI_COMMIT=%s\nCOREELEC_VERSION=old\n' % ('c' * 40, 'b' * 40, 'e' * 40))
+        'VERSION=%s\nBUILD_ID=%s\nKODI_COMMIT=%s\nCOREELEC_VERSION=old\n' % ('c' * 40, 'b' * 40, 'e' * 40))
     osrel = os.path.join(tmp, 'os-release')
     open(osrel, 'w').write('VERSION="22.0"\nBUILD_ID="%s"\nKODI_COMMIT="%s"\n' % ('b' * 40, 'e' * 40))
     rebooted = os.path.join(tmp, 'rebooted')
@@ -242,10 +242,10 @@ def main():
         s = install_and_wait()
         check(s.get('state') == 'done', 'a bundle with a legacy dovi.ko still installs')
 
-        # symphony.tar (the Symphony overlay) is an optional member.
-        upload(bundle(extra={'symphony.tar': b'T' * 100}))
+        # extra.tar (an installer extension) is an optional member.
+        upload(bundle(extra={'extra.tar': b'T' * 100}))
         s = install_and_wait()
-        check(s.get('state') == 'done', 'bundle with symphony.tar accepted (%s)' % s.get('error', ''))
+        check(s.get('state') == 'done', 'bundle with extra.tar accepted (%s)' % s.get('error', ''))
         upload(bundle(extra={'stray.bin': b'x'}))
         s = install_and_wait()
         check(s.get('state') == 'error' and 'stray.bin' in s.get('error', ''), 'other extra members still refused')

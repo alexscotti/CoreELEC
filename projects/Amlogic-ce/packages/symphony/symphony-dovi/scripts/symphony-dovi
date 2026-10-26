@@ -1,0 +1,441 @@
+#!/usr/bin/python3
+"""symphony-dovi - find Amlogic's Dolby Vision kernel module on a USB stick at
+boot and copy it to /storage/.config/dovi.ko, which is where CoreELEC's
+dovi-loader looks for it.
+
+CoreELEC deliberately ships no dovi.ko: the module is Amlogic's, extracted
+from a box's Android firmware, and every user downloads it themselves. We do
+the same, so the module is in no image and in no git tree. It is provisioned
+ONCE, by hand, onto a USB stick:
+
+  <stick>/SYMPHONY/dovi.ko     a stick with a SYMPHONY directory
+  <stick>/dovi.ko              the root of any FAT32 stick
+
+Order of the search is the device order, so one stick carrying both is the
+same stick either way.
+
+A stick is only ever READ. The module is copied to /storage/.config/dovi.ko
+and that is the end of it: nothing is written back, nothing is tidied up, and
+the file you put there stays where you put it. To replace the module, put a
+different one on the stick and delete /storage/.config/dovi.ko -- a boot that
+already has a valid one there does not look at the sticks at all.
+
+Runs before opentee_linuxdriver.service, which is what runs dovi-loader. It
+cannot wait for udevil that early (and must not make Kodi's start wait on a
+mount that may never come), so it finds vfat partitions itself with blkid and
+mounts each read-only for the look. A boot whose /storage/.config/dovi.ko is
+already a valid module does none of that and returns at once: the scan is the
+cost of provisioning, not of booting.
+
+What a candidate has to be, checked HERE because dovi-loader does not check
+this path at all (it gates only the modules it pulls out of Android):
+
+  - an aarch64 ELF relocatable with a .modinfo section, i.e. a kernel module
+  - whose name or description says it is the Amlogic Dolby Vision driver
+  - whose vermagic kernel is >= 5.15.137, dovi-loader's own minimum
+
+so a truncated download or the wrong file named dovi.ko is reported and
+skipped rather than insmod'd into the kernel on the next boot.
+
+A boot that ends with no module is not an error: the box runs normally and
+Dolby Vision material plays as HDR10, so nothing is put on screen. The
+journal says what was looked at and why anything was refused.
+
+A boot that DOES load it says so once, briefly, through Kodi's own
+Notification builtin over the EventServer (`notify`, run after Kodi starts).
+That is the only thing either outcome puts on the TV.
+
+  symphony-dovi scan     the boot step (default)
+  symphony-dovi notify   once Kodi is up: a brief toast when the module IS
+                         loaded, run by symphony-dovi-notify.service
+  symphony-dovi status   one line per fact
+
+SYMDOVI_* variables are for tests/test_symphony_dovi.sh only.
+"""
+import os
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+ROOT = os.environ.get('SYMDOVI_ROOT', '')          # test prefix for every absolute path
+STORAGE = ROOT + '/storage'
+TARGET = STORAGE + '/.config/dovi.ko'
+MOUNTS = ROOT + '/proc/mounts'
+MNT_DIR = ROOT + '/var/run/symphony-dovi'
+NO_SYSTEM = bool(os.environ.get('SYMDOVI_NO_SYSTEM'))  # tests: no blkid, no mount
+# tests: "<dev>=<dir>,<dev>=<dir>" -- devices already readable at those paths
+STUB_DEVS = os.environ.get('SYMDOVI_DEVS', '')
+WAIT = float(os.environ.get('SYMDOVI_WAIT', '8'))
+# notify: how long to wait for Kodi to answer, and how long the toast stays up
+KODI_WAIT = float(os.environ.get('SYMDOVI_KODI_WAIT', '90'))
+TOAST_MS = int(os.environ.get('SYMDOVI_TOAST_MS', '4000'))
+MODULES = ROOT + '/proc/modules'
+# Once per BOOT, not once per Kodi. /run is tmpfs, so this is gone on the next
+# boot and present for the rest of this one.
+NOTIFIED = ROOT + '/run/symphony-dovi.notified'
+
+# dovi-loader's own floor (check_dovi_version ... 5 15 137). A module built for
+# an older kernel loads and then does not work.
+MIN_KERNEL = (5, 15, 137)
+
+NAMES = ('/SYMPHONY/dovi.ko', '/dovi.ko')
+
+
+def log(msg):
+    print('symphony-dovi: ' + msg, flush=True)
+
+
+def sh(args, **kw):
+    """Run a command, log a failure to run it, never raise."""
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=60, **kw)
+    except (OSError, subprocess.SubprocessError) as e:
+        log('%s: %s' % (' '.join(args), e))
+        return None
+
+
+# ------------------------------------------------------------------ the module
+def modinfo(path):
+    """The module's .modinfo as a dict, or None when `path` is not an aarch64
+    kernel module. Read here rather than with modinfo(8) so the check is the
+    same on the box and in the test harness, and so a file that is not an ELF
+    object at all is rejected by structure instead of by string matching."""
+    try:
+        with open(path, 'rb') as f:
+            blob = f.read()
+    except OSError:
+        return None
+    # ELF64 little-endian, ET_REL, EM_AARCH64 (183).
+    if len(blob) < 64 or blob[:4] != b'\x7fELF' or blob[4] != 2 or blob[5] != 1:
+        return None
+    e_type, e_machine = struct.unpack_from('<HH', blob, 16)
+    if e_type != 1 or e_machine != 183:
+        return None
+    e_shoff, = struct.unpack_from('<Q', blob, 40)
+    e_shentsize, e_shnum, e_shstrndx = struct.unpack_from('<HHH', blob, 58)
+    if not e_shoff or e_shnum == 0 or e_shstrndx >= e_shnum:
+        return None
+
+    def section(i):
+        off = e_shoff + i * e_shentsize
+        if off + 64 > len(blob):
+            return None
+        name, _ = struct.unpack_from('<II', blob, off)
+        sh_offset, sh_size = struct.unpack_from('<QQ', blob, off + 24)
+        return name, sh_offset, sh_size
+
+    shstr = section(e_shstrndx)
+    if not shstr:
+        return None
+    strtab = blob[shstr[1]:shstr[1] + shstr[2]]
+    for i in range(e_shnum):
+        s = section(i)
+        if not s:
+            return None
+        end = strtab.find(b'\0', s[0])
+        if strtab[s[0]:end if end >= 0 else None] != b'.modinfo':
+            continue
+        out = {}
+        for item in blob[s[1]:s[1] + s[2]].split(b'\0'):
+            if not item:
+                continue
+            k, sep, v = item.decode('utf-8', 'replace').partition('=')
+            if sep and k not in out:
+                out[k] = v
+        return out
+    return None
+
+
+def kernel_version(vermagic):
+    """The leading x.y.z of a vermagic string as ints, or None.
+    "5.15.170-android14-11-g7f9c2d1e4b68-dirty SMP ..." -> (5, 15, 170)."""
+    head = vermagic.split()[0] if vermagic.split() else ''
+    parts = head.split('-')[0].split('.')
+    if len(parts) < 3:
+        return None
+    try:
+        return tuple(int(p) for p in parts[:3])
+    except ValueError:
+        return None
+
+
+def check(path):
+    """(modinfo, None) when `path` is a usable dovi module, (None, why) when
+    it is not. `why` is for the log: an unusable module is the whole reason
+    this step exists, so it is never silent."""
+    info = modinfo(path)
+    if info is None:
+        return None, 'not an aarch64 kernel module'
+    name = info.get('name', '')
+    desc = info.get('description', '')
+    if not (name.startswith('dovi') or 'dolby vision' in desc.lower()):
+        return None, 'not the Dolby Vision driver (name=%r description=%r)' % (name, desc)
+    vermagic = info.get('vermagic', '')
+    ver = kernel_version(vermagic)
+    if ver is None:
+        return None, 'no kernel version in vermagic %r' % vermagic
+    if ver < MIN_KERNEL:
+        return None, 'built for kernel %s, dovi-loader needs at least %s' % (
+            '.'.join(map(str, ver)), '.'.join(map(str, MIN_KERNEL)))
+    return info, None
+
+
+def describe(info):
+    return '%s, kernel %s' % (info.get('name', '?'),
+                              (info.get('vermagic', '?').split() or ['?'])[0])
+
+
+# ----------------------------------------------------------------- the devices
+# Mount points that are the system's own. A vfat partition mounted at one of
+# these is never a place to look for a hand-provisioned module, and must never
+# be unmounted from under the running system.
+# NOT ROOT-prefixed: these are mount points as /proc/mounts spells them, which
+# a test's fake /proc/mounts also spells the box's way.
+OURS = ('/flash', '/storage')
+
+
+def mounted_devices():
+    """Device -> mountpoint, from /proc/mounts."""
+    out = {}
+    try:
+        with open(MOUNTS, errors='replace') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    out.setdefault(parts[0], parts[1])
+    except OSError:
+        pass
+    return out
+
+
+def vfat_devices():
+    """Every vfat partition, in device order. blkid's cache is bypassed: a
+    stick plugged in since the last boot is not in it."""
+    if STUB_DEVS:
+        return [d.split('=', 1)[0] for d in STUB_DEVS.split(',') if '=' in d]
+    r = sh(['blkid', '-c', '/dev/null', '-t', 'TYPE=vfat', '-o', 'device'])
+    if r is None or r.returncode != 0:
+        return []
+    return sorted(line.strip() for line in r.stdout.splitlines() if line.strip())
+
+
+def stub_dir(dev):
+    for d in STUB_DEVS.split(','):
+        name, _, path = d.partition('=')
+        if name == dev:
+            return path
+    return None
+
+
+def look(dev, at=None):
+    """Return (path-of-a-valid-module, modinfo) found on `dev`, or
+    (None, None).
+
+    `at` is where the device is already mounted, if it is: udevil mounts a
+    removable stick under /var/media as soon as udev sees it, which can easily
+    be before this step runs. Such a device is read IN PLACE - mounting it a
+    second time would fail and unmounting it would pull it out from under
+    whatever udevil told about it, and skipping it (which this used to do) left
+    the Symphony stick, the most likely place for the module, unsearched.
+    Otherwise it is mounted read-only here and unmounted again."""
+    if STUB_DEVS:
+        return look_in(stub_dir(dev), dev)
+    if at:
+        return look_in(at, dev)
+    os.makedirs(MNT_DIR, exist_ok=True)
+    r = sh(['mount', '-t', 'vfat', '-o', 'ro,noexec,nodev,nosuid', dev, MNT_DIR])
+    if r is None or r.returncode != 0:
+        # udevil may have mounted it in the moment between reading /proc/mounts
+        # and here - seen on the first real boot of this, which logged
+        # "already mounted on /var/media/..." and only found the module on the
+        # next pass a second later. Re-read and take it in place.
+        at = mounted_devices().get(dev)
+        if at:
+            log('%s: mounted at %s while we looked; reading it there' % (dev, at))
+            return look_in(at, dev)
+        log('%s: cannot mount (%s)' % (dev, (r.stderr if r else '').strip()))
+        return None, None
+    try:
+        return look_in(MNT_DIR, dev)
+    finally:
+        sh(['umount', MNT_DIR])
+
+
+def look_in(mnt, dev):
+    if not mnt:
+        return None, None
+    for name in NAMES:
+        path = mnt + name
+        if not os.path.isfile(path):
+            continue
+        info, why = check(path)
+        if info:
+            log('%s: %s%s is %s' % (dev, dev, name, describe(info)))
+            return path, info
+        log('%s: %s%s rejected - %s' % (dev, dev, name, why))
+    return None, None
+
+
+# -------------------------------------------------------------------- the copy
+def install(src, info):
+    """Copy to TARGET through a temporary name, so a dovi-loader reading it at
+    the same time never sees a half-written module."""
+    os.makedirs(os.path.dirname(TARGET), exist_ok=True)
+    tmp = TARGET + '.new'
+    try:
+        with open(src, 'rb') as f:
+            blob = f.read()
+        with open(tmp, 'wb') as f:
+            f.write(blob)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, TARGET)
+    except OSError as e:
+        log('cannot write %s: %s' % (TARGET, e))
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return 1
+    sh(['sync'])
+    log('captured %s -> %s (%s, %d bytes)' % (src, TARGET, describe(info), len(blob)))
+    return 0
+
+
+def scan():
+    info, why = check(TARGET)
+    if info:
+        log('%s is already %s; not scanning' % (TARGET, describe(info)))
+        return 0
+    if os.path.exists(TARGET):
+        log('%s is unusable (%s); looking for a better one' % (TARGET, why))
+
+    deadline = time.time() + WAIT
+    waited = False
+    while True:
+        mounted = mounted_devices()
+        devs = [d for d in vfat_devices() if mounted.get(d) not in OURS]
+        for dev in devs:
+            path, found = look(dev, mounted.get(dev))
+            if found:
+                return install(path, found)
+        if time.time() >= deadline:
+            break
+        if not waited:
+            log('no dovi.ko on %s; waiting up to %gs for a stick'
+                % (', '.join(devs) or 'any vfat partition', WAIT))
+            waited = True
+        time.sleep(0.5)
+    log('no dovi.ko found: put it in SYMPHONY/ on the Symphony stick, or in the '
+        'root of any FAT32 stick, and reboot. Dolby Vision plays as HDR until then.')
+    return 0
+
+
+# ------------------------------------------------------------------ the toast
+def loaded():
+    """The dovi module's name in /proc/modules, or None. dovi-loader rmmods
+    plain "dovi", so that is the name the kernel knows it by."""
+    try:
+        with open(MODULES, errors='replace') as f:
+            for line in f:
+                name = line.split(' ', 1)[0]
+                if name == 'dovi' or name.startswith('dovi_'):
+                    return name
+    except OSError:
+        pass
+    return None
+
+
+# Kodi's TCP JSON-RPC server. Kodi starts it whenever the EventServer is
+# enabled (services.esenabled, on by default; localhost-only unless
+# services.esallinterfaces), in the same network-services start as the web
+# server - which is off by default, so it cannot be the signal.
+KODI_PORT = int(os.environ.get('SYMDOVI_KODI_PORT', '9090'))
+
+
+def kodi_up(deadline):
+    """Wait for Kodi's JSON-RPC port to accept a connection, which is late
+    enough in its startup that a notification is not thrown away. No request
+    is made: the open port is the whole signal."""
+    while time.time() < deadline:
+        s = socket.socket()
+        s.settimeout(2)
+        try:
+            s.connect(('127.0.0.1', KODI_PORT))
+            return True
+        except OSError:
+            time.sleep(1)
+        finally:
+            s.close()
+    return False
+
+
+def notify():
+    """One short toast, only when the module actually loaded. Silent
+    otherwise: a box without it plays Dolby Vision material as HDR10 and is
+    not in an error state.
+
+    Once per boot. Kodi restarts on its own (kodi.service is Restart=always,
+    and a controller may quit it on purpose after a film), and a toast on the screen of someone mid-session who
+    merely stopped a disc would be noise. systemd does not re-run a oneshot
+    because a unit it is ordered After= restarted, so this is already true;
+    the marker makes it true of the step itself, for a hand-run or a future
+    caller."""
+    if os.path.exists(NOTIFIED):
+        log('already notified this boot; staying quiet')
+        return 0
+    name = loaded()
+    if not name:
+        log('dovi module not loaded; nothing to say')
+        return 0
+    info, _ = check(TARGET)
+    where = 'the USB stick' if info else 'the system'
+    # Kodi's Notification builtin splits its arguments on commas, so the text
+    # must not contain any.
+    text = 'Driver loaded from %s' % where
+    if NO_SYSTEM:
+        log('would notify: %s' % text)
+        mark_notified()
+        return 0
+    if not kodi_up(time.time() + KODI_WAIT):
+        log('Kodi did not answer in %gs; not notifying' % KODI_WAIT)
+        return 0
+    sh(['kodi-send', '--action=Notification(Dolby Vision,%s,%d)' % (text, TOAST_MS)])
+    mark_notified()
+    log('notified: %s (%s)' % (text, name))
+    return 0
+
+
+def mark_notified():
+    try:
+        os.makedirs(os.path.dirname(NOTIFIED), exist_ok=True)
+        with open(NOTIFIED, 'w') as f:
+            f.write('%d\n' % int(time.time()))
+    except OSError as e:
+        log('cannot write %s: %s' % (NOTIFIED, e))
+
+
+def status():
+    info, why = check(TARGET)
+    print('dovi=%s' % (TARGET if info else ''))
+    print('dovi_module=%s' % (describe(info) if info else ''))
+    print('dovi_why=%s' % ('' if info else (why if os.path.exists(TARGET) else 'absent')))
+    return 0
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else 'scan'
+    if cmd == 'scan':
+        return scan()
+    if cmd == 'notify':
+        return notify()
+    if cmd == 'status':
+        return status()
+    print(__doc__)
+    return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))

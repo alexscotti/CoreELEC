@@ -1,0 +1,39 @@
+[Unit]
+Description=Symphony: say on screen that Dolby Vision is loaded
+# After Kodi, because the toast goes THROUGH Kodi (its Notification builtin
+# over the EventServer). The step waits for Kodi's JSON-RPC port (9090) to
+# accept a connection before sending, since systemd calls kodi.service
+# started long before the GUI would keep a notification.
+#
+# Nothing is ordered after this, so its wait holds up nothing. A box with no
+# module says nothing and exits at once.
+After=kodi.service local-fs.target
+
+[Service]
+Type=oneshot
+# A oneshot is not re-run because kodi.service restarted (After= is ordering,
+# not a trigger), and this keeps it "active (exited)" so a stray start is a
+# no-op too. The step also marks /run, so the toast is once per boot whatever
+# calls it.
+RemainAfterExit=yes
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /usr/lib/coreelec/symphony-dovi notify
+
+[Install]
+# kodi.target, NOT multi-user.target. This unit is After=kodi.service, and
+# kodi.service reaches multi-user.target transitively (kodi.service ->
+# remote-config-tx -> remote-config -> multi-user.target), so wanting it from
+# multi-user.target is a cycle - and systemd breaks a cycle by DELETING a job,
+# which on 2026-10-09 was this one:
+#
+#   multi-user.target: Found ordering cycle: symphony-dovi-notify.service/start
+#     after kodi.service/start after remote-config-tx.service/start
+#     after remote-config.service/start after multi-user.target/start
+#     - after symphony-dovi-notify.service
+#   Job symphony-dovi-notify.service/start deleted to break ordering cycle
+#
+# The unit then sits inactive with no journal entries at all, which looks
+# exactly like a unit nobody enabled. kodi.target is the default target and the
+# one kodi.service itself is WantedBy, so ordering after it there is free.
+WantedBy=kodi.target

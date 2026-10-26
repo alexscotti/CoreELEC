@@ -1,0 +1,23 @@
+[Unit]
+Description=Symphony: capture Amlogic's dovi.ko from a USB stick
+# opentee_linuxdriver.service runs dovi-loader, which insmods the module and
+# is itself Before=kodi.service - so this has to come first or the capture is
+# a boot too late. local-fs.target has /storage, which holds the module's
+# destination, /storage/.config/dovi.ko.
+#
+# Deliberately NOT ordered after udevil or any USB mount: Kodi's start must
+# not wait on a stick that may never come. This step finds vfat partitions
+# itself and exits at once when the module is already captured, which is
+# every boot after the first.
+After=local-fs.target
+Before=opentee_linuxdriver.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /usr/lib/coreelec/symphony-dovi scan
+
+[Install]
+WantedBy=multi-user.target

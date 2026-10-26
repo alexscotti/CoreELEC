@@ -1359,7 +1359,13 @@ done
 /usr/bin/busybox chroot /sysroot /usr/sbin/kernel-overlays-setup
 
 # tell OE settings addon to disable updates
-if [ "$UPDATE_DISABLED" = "yes" ]; then
+# Symphony: also on an A/B slot stick. check_update above refuses an in-place
+# update there, so all the add-on's updater could do is ask CoreELEC's server
+# for an official build, download it into /storage/.update and have the next
+# boot throw it away. Slots are updated from their own bundles (Host
+# Management) instead; with this flag the add-on hides its Updates menu and
+# never runs the check.
+if [ "$UPDATE_DISABLED" = "yes" ] || [ "$IMAGE_SYSTEM" != "SYSTEM" ]; then
   echo "" > /sysroot/dev/.update_disabled
 fi
 

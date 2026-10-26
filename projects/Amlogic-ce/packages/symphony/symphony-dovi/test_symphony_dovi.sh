@@ -76,6 +76,14 @@ has "captured" "captures from the root of a plain stick"
 cmp -s $R/sticks/plain/dovi.ko $R/storage/.config/dovi.ko \
   && ok "captured bytes match the stick" || bad "captured bytes differ"
 
+# --- a stick this step mounts itself is unmounted before the copy: the module
+# has to have been read while it was mounted (it failed with ENOENT on the
+# first public stick, 2026-10-26)
+reset; good $R/sticks/plain/dovi.ko; cp $R/sticks/plain/dovi.ko $T/orig.ko; devs "/dev/sda1=$R/sticks/plain"
+SYMDOVI_STUB_UMOUNT=1 run scan
+has "captured" "captures from a stick that is unmounted before the copy"
+cmp -s $T/orig.ko $R/storage/.config/dovi.ko && ok "the bytes read while mounted are the ones written" || bad "captured bytes differ or are missing: $(cat $R/out)"
+
 # --- SYMPHONY/dovi.ko on the Symphony stick
 reset; good $R/sticks/sym/SYMPHONY/dovi.ko; devs "/dev/sdb1=$R/sticks/sym"
 run scan

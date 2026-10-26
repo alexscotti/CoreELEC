@@ -230,8 +230,11 @@ def stub_dir(dev):
 
 
 def look(dev, at=None):
-    """Return (path-of-a-valid-module, modinfo) found on `dev`, or
-    (None, None).
+    """Return (path-of-a-valid-module, modinfo, its bytes) found on `dev`, or
+    (None, None, None). The bytes are read here, while the device is still
+    mounted: a device this mounts itself is unmounted again before return, and
+    the path then names nothing (the copy used to read it after that, and
+    failed with ENOENT on every stick udevil had not mounted yet).
 
     `at` is where the device is already mounted, if it is: udevil mounts a
     removable stick under /var/media as soon as udev sees it, which can easily
@@ -241,7 +244,10 @@ def look(dev, at=None):
     the Symphony stick, the most likely place for the module, unsearched.
     Otherwise it is mounted read-only here and unmounted again."""
     if STUB_DEVS:
-        return look_in(stub_dir(dev), dev)
+        found = look_in(stub_dir(dev), dev)
+        if found[0] and os.environ.get('SYMDOVI_STUB_UMOUNT'):
+            os.unlink(found[0])     # tests: the stick is unmounted on return
+        return found
     if at:
         return look_in(at, dev)
     os.makedirs(MNT_DIR, exist_ok=True)
@@ -256,7 +262,7 @@ def look(dev, at=None):
             log('%s: mounted at %s while we looked; reading it there' % (dev, at))
             return look_in(at, dev)
         log('%s: cannot mount (%s)' % (dev, (r.stderr if r else '').strip()))
-        return None, None
+        return None, None, None
     try:
         return look_in(MNT_DIR, dev)
     finally:
@@ -265,28 +271,33 @@ def look(dev, at=None):
 
 def look_in(mnt, dev):
     if not mnt:
-        return None, None
+        return None, None, None
     for name in NAMES:
         path = mnt + name
         if not os.path.isfile(path):
             continue
         info, why = check(path)
         if info:
+            try:
+                with open(path, 'rb') as f:
+                    blob = f.read()
+            except OSError as e:
+                log('%s: %s%s cannot be read: %s' % (dev, dev, name, e))
+                continue
             log('%s: %s%s is %s' % (dev, dev, name, describe(info)))
-            return path, info
+            return path, info, blob
         log('%s: %s%s rejected - %s' % (dev, dev, name, why))
-    return None, None
+    return None, None, None
 
 
 # -------------------------------------------------------------------- the copy
-def install(src, info):
-    """Copy to TARGET through a temporary name, so a dovi-loader reading it at
-    the same time never sees a half-written module."""
+def install(src, info, blob):
+    """Write `blob` (read from `src`) to TARGET through a temporary name, so a
+    dovi-loader reading it at the same time never sees a half-written
+    module."""
     os.makedirs(os.path.dirname(TARGET), exist_ok=True)
     tmp = TARGET + '.new'
     try:
-        with open(src, 'rb') as f:
-            blob = f.read()
         with open(tmp, 'wb') as f:
             f.write(blob)
             f.flush()
@@ -318,9 +329,9 @@ def scan():
         mounted = mounted_devices()
         devs = [d for d in vfat_devices() if mounted.get(d) not in OURS]
         for dev in devs:
-            path, found = look(dev, mounted.get(dev))
+            path, found, blob = look(dev, mounted.get(dev))
             if found:
-                return install(path, found)
+                return install(path, found, blob)
         if time.time() >= deadline:
             break
         if not waited:

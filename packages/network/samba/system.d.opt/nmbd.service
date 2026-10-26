@@ -3,6 +3,8 @@ Description=Samba NMB Daemon
 Wants=network-online.target samba-config.service
 After=network-online.target samba-config.service
 ConditionPathExists=!/storage/.cache/services/samba.disabled
+# Symphony: opt-in, see samba-config
+ConditionPathExists=/storage/.cache/services/samba.conf
 ConditionPathExists=/run/samba/smb.conf
 
 [Service]

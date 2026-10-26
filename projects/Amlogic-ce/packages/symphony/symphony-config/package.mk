@@ -36,7 +36,9 @@ PKG_TOOLCHAIN="manual"
 # update mode, the DV LED and the playlists path.
 #
 # Also: the timezone (and tz-data ordered after usercache), the persistent
-# journal, SSH via sshd.conf, WoL autostart.sh, cec_HDMI.xml (the box ignores
+# journal, SSH via sshd.conf, Samba ON via samba.conf (opt-in in every other
+# build; we move files to the box with it in development - samba.disabled,
+# the settings add-on's "off", still wins), WoL autostart.sh, cec_HDMI.xml (the box ignores
 # TV standby) and oe_settings.xml (CoreELEC's first-run wizard answered,
 # AutoUpdate manual, wol on).
 #

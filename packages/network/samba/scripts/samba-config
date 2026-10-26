@@ -45,13 +45,15 @@ fi
 
 echo >>${SMB_TMP}
 
-if [ ! -f /storage/.cache/services/samba.disabled ]; then
+# Symphony: the SMB server is opt-in. It runs only once samba.conf exists -
+# written by the CoreELEC settings add-on's Samba toggle, or shipped in
+# /usr/cache/services by a build that wants it on (our theater's
+# symphony-config) - instead of being created here on first boot. CoreELEC's
+# defaults are guest access as root with writable shares, /storage/.config
+# among them. A samba.disabled still wins (the add-on's "off").
+if [ ! -f /storage/.cache/services/samba.disabled ] && [ -f /storage/.cache/services/samba.conf ]; then
 
   ### Generate smb.conf
-
-  if [ ! -f /storage/.cache/services/samba.conf ]; then
-    cp /usr/share/services/samba.conf /storage/.cache/services
-  fi
 
   # Specify defaults here, in case these new properties not yet added in .cache
   SAMBA_WORKGROUP=WORKGROUP

@@ -9,7 +9,11 @@
 #
 # A firmware image here is a slot bundle, coreelec_<date>_<version>_aarch64_slot.tar:
 # kernel.img, SYSTEM, MANIFEST and am9slot.sh, the installer that
-# goes with it. Installing runs THAT installer (its sha256 is in the MANIFEST),
+# goes with it - or the stick image itself, <...>-am9pro-usb.img.gz, as on the
+# Pi webui, where a full disk image can be burned or uploaded. Slot A on the
+# stick's boot FAT IS that bundle (kernel_A.img, SYSTEM_A, SLOT_A.manifest,
+# am9slot.sh, SLOT_A.extra.tar), so it is read back out of the image's FAT32
+# partition (image_to_bundle) and installed the same way. Installing runs THAT installer (its sha256 is in the MANIFEST),
 # so the installer always matches what it installs; it leaves a copy of itself
 # at /flash/am9slot.sh, which goback uses.
 #
@@ -30,6 +34,7 @@ import os
 import re
 import shutil
 import socket
+import gzip
 import struct
 import subprocess
 import sys
@@ -65,6 +70,12 @@ INSTALL_LOG = os.path.join(DATA, 'install.log')
 # response to the page after a 32MB request body.
 CHUNK_SIZE = 8 * 1024 * 1024
 NAME_RE = re.compile(r'^coreelec_[0-9]+_([0-9a-f]{40}|current-[0-9]+)_aarch64_slot\.tar$')
+IMAGE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*-am9pro-usb\.img\.gz$')
+NAME_HELP = 'coreelec_<date>_<version>_aarch64_slot.tar or <...>-am9pro-usb.img.gz'
+
+
+def accepted(name):
+    return bool(NAME_RE.match(name) or IMAGE_RE.match(name))
 # dovi.ko is NOT one of them: Amlogic's module is in no image and no bundle,
 # and the box captures it from a USB stick at boot (symphony-dovi). A bundle
 # built before 2026-10-09 still carries one; it is simply ignored here, and
@@ -159,6 +170,157 @@ def fmt_bytes(b):
     return '%.0f KB' % (b / 1024.0)
 
 
+# ------------------------------------------------------ stick image -> bundle
+# What slot A on a stick's boot FAT holds, as bundle members; extra.tar only
+# when the bundle had one.
+SLOT_A_FILES = (('kernel_A.img', 'kernel.img'), ('SYSTEM_A', 'SYSTEM'),
+                ('SLOT_A.manifest', 'MANIFEST'), ('am9slot.sh', 'am9slot.sh'))
+SLOT_A_OPTIONAL = (('SLOT_A.extra.tar', 'extra.tar'),)
+FAT_TYPES = (0x0b, 0x0c)
+
+
+def extract_partition1(gz_path, out_path, block=4 << 20):
+    """Stream the image's first (FAT32) partition out of the .img.gz into
+    out_path, SPARSE: the 1.5 GB partition is mostly empty, and only what is
+    in use (about the size of the slot) is written. Returns its size."""
+    with gzip.open(gz_path, 'rb') as g:
+        mbr = g.read(512)
+        if len(mbr) != 512 or mbr[510:512] != b'\x55\xaa':
+            raise RuntimeError('not a disk image (no partition table)')
+        part = None
+        for i in range(4):
+            e = mbr[446 + 16 * i:462 + 16 * i]
+            start, count = struct.unpack('<II', e[8:16])
+            if e[4] in FAT_TYPES and count:
+                part = (start, count)
+                break
+        if not part:
+            raise RuntimeError('the image has no FAT32 partition')
+        skip = part[0] * 512 - 512
+        while skip:
+            n = len(g.read(min(block, skip)))
+            if not n:
+                raise RuntimeError('the image ends before its first partition')
+            skip -= n
+        size = left = part[1] * 512
+        with open(out_path, 'wb') as o:
+            while left:
+                buf = g.read(min(block, left))
+                if not buf:
+                    raise RuntimeError('the image ends inside its first partition')
+                if buf.strip(b'\0'):
+                    o.write(buf)
+                else:
+                    o.seek(len(buf), 1)
+                left -= len(buf)
+            o.truncate(size)
+    return size
+
+
+class Fat32:
+    """Just enough FAT32 to read regular files out of a root directory:
+    long names, cluster chains. Read-only."""
+
+    def __init__(self, f):
+        self.f = f
+        f.seek(0)
+        bs = f.read(512)
+        if len(bs) != 512 or bs[510:512] != b'\x55\xaa':
+            raise RuntimeError('the partition has no FAT boot sector')
+        bps, spc, rsvd, nfats = struct.unpack('<HBHB', bs[11:17])
+        fat16, = struct.unpack('<H', bs[22:24])
+        fatsz, = struct.unpack('<I', bs[36:40])
+        self.root, = struct.unpack('<I', bs[44:48])
+        if bps not in (512, 1024, 2048, 4096) or not spc or fat16 or not fatsz or not nfats:
+            raise RuntimeError('the partition is not FAT32')
+        self.csize = bps * spc
+        f.seek(rsvd * bps)
+        self.fat = f.read(fatsz * bps)
+        self.data = (rsvd + nfats * fatsz) * bps
+
+    def chain(self, c):
+        seen = 0
+        limit = len(self.fat) // 4
+        while 2 <= c < 0x0FFFFFF8:
+            if c >= limit or seen > limit:
+                raise RuntimeError('broken cluster chain')
+            yield c
+            seen += 1
+            c = struct.unpack_from('<I', self.fat, c * 4)[0] & 0x0FFFFFFF
+
+    def read_cluster(self, c):
+        self.f.seek(self.data + (c - 2) * self.csize)
+        return self.f.read(self.csize)
+
+    def entries(self):
+        """{name.lower(): (name, first cluster, size)} of the root's files."""
+        out, lfn = {}, {}
+        for c in self.chain(self.root):
+            d = self.read_cluster(c)
+            for o in range(0, len(d), 32):
+                e = d[o:o + 32]
+                if e[0] == 0:
+                    return out
+                if e[0] == 0xE5:
+                    lfn = {}
+                    continue
+                if e[11] == 0x0F:
+                    seq = e[0] & 0x1F
+                    lfn[seq] = (e[1:11] + e[14:26] + e[28:32]).decode('utf-16-le', 'replace')
+                    continue
+                if e[11] & 0x18:            # volume label or directory
+                    lfn = {}
+                    continue
+                if lfn:
+                    name = ''.join(lfn[k] for k in sorted(lfn)).split('\0')[0].rstrip('\uffff')
+                else:
+                    base = e[0:8].decode('ascii', 'replace').rstrip()
+                    ext = e[8:11].decode('ascii', 'replace').rstrip()
+                    name = base + ('.' + ext if ext else '')
+                lfn = {}
+                hi, = struct.unpack('<H', e[20:22])
+                lo, = struct.unpack('<H', e[26:28])
+                size, = struct.unpack('<I', e[28:32])
+                out[name.lower()] = (name, (hi << 16) | lo, size)
+        return out
+
+    def copy(self, entry, dest):
+        _, c, size = entry
+        left = size
+        with open(dest, 'wb') as o:
+            for cl in self.chain(c):
+                if left <= 0:
+                    break
+                buf = self.read_cluster(cl)[:left]
+                o.write(buf)
+                left -= len(buf)
+        if left > 0:
+            raise RuntimeError('%s is shorter on the FAT than its size' % entry[0])
+
+
+def image_to_bundle(gz_path, stage, say=lambda m: None):
+    """Slot A of a stick image, as bundle members in `stage`."""
+    fat_img = os.path.join(stage, '.fat.img')
+    try:
+        say('== reading the stick image\'s boot partition')
+        extract_partition1(gz_path, fat_img)
+        with open(fat_img, 'rb') as f:
+            fat = Fat32(f)
+            have = fat.entries()
+            missing = [src for src, _ in SLOT_A_FILES if src.lower() not in have]
+            if missing:
+                raise RuntimeError('not a Symphony stick image (no %s on its boot partition)' % ', '.join(missing))
+            say('== taking slot A out of it')
+            for src, dst in SLOT_A_FILES + SLOT_A_OPTIONAL:
+                if src.lower() in have:
+                    fat.copy(have[src.lower()], os.path.join(stage, dst))
+    finally:
+        try:
+            os.remove(fat_img)
+        except OSError:
+            pass
+
+
 def uploaded():
     """(filename, version) of a complete upload, or (None, None)."""
     if not os.path.exists(UPLOAD_FINAL):
@@ -168,6 +330,7 @@ def uploaded():
     except OSError:
         name = ''
     m = NAME_RE.match(name)
+    # A stick image's version is in its slot A manifest, known once unpacked.
     return (name or 'firmware_slot.tar'), (m.group(1) if m else '')
 
 
@@ -203,6 +366,18 @@ def log_lines():
         return []
 
 
+def unpack_bundle(path, stage):
+    with tarfile.open(path) as tf:
+        members = tf.getmembers()
+        names = sorted(m.name for m in members)
+        missing = [f for f in BUNDLE_FILES if f not in names]
+        extra = [n for n in names if n not in BUNDLE_FILES + BUNDLE_OPTIONAL + BUNDLE_IGNORED]
+        if missing or extra or not all(m.isfile() for m in members):
+            raise RuntimeError('not a slot bundle (missing %s, unexpected %s)' % (missing, extra))
+        for m in members:
+            tf.extract(m, stage, filter='data')
+
+
 def run_install(name, status):
     """Background: unpack the upload, check its installer, run it. start_install
     has written status ('running') already."""
@@ -217,15 +392,14 @@ def run_install(name, status):
         say('== unpacking %s' % name)
         shutil.rmtree(STAGE, ignore_errors=True)
         os.makedirs(STAGE)
-        with tarfile.open(UPLOAD_FINAL) as tf:
-            members = tf.getmembers()
-            names = sorted(m.name for m in members)
-            missing = [f for f in BUNDLE_FILES if f not in names]
-            extra = [n for n in names if n not in BUNDLE_FILES + BUNDLE_OPTIONAL + BUNDLE_IGNORED]
-            if missing or extra or not all(m.isfile() for m in members):
-                raise RuntimeError('not a slot bundle (missing %s, unexpected %s)' % (missing, extra))
-            for m in members:
-                tf.extract(m, STAGE, filter='data')
+        if IMAGE_RE.match(name):
+            image_to_bundle(UPLOAD_FINAL, STAGE, say)
+            v = read_kv(os.path.join(STAGE, 'MANIFEST')).get('VERSION', '')
+            if v:
+                status['version'] = v
+                write_status(status)
+        else:
+            unpack_bundle(UPLOAD_FINAL, STAGE)
         man = read_kv(os.path.join(STAGE, 'MANIFEST'))
         want = man.get('am9slot_sha256', '')
         got = hashlib.sha256(open(os.path.join(STAGE, 'am9slot.sh'), 'rb').read()).hexdigest()
@@ -554,9 +728,9 @@ def render_page(message=''):
                         commit_link(COREELEC_REPO, i['build_id']) if i else '',
                         commit_link(KODI_REPO, i['kodi']) if i else ''))
         h.append('</table>')
-    h.append('<p style="color: #666; font-size: 0.9em; margin: 10px 0;">Expected filename pattern: '
-             '<strong>coreelec_*_aarch64_slot.tar</strong></p>')
-    h.append('<form id="firmwareForm"><input type="file" id="firmwareFile" name="file" accept=".tar" required> '
+    h.append('<p style="color: #666; font-size: 0.9em; margin: 10px 0;">Expected: a slot bundle '
+             '<strong>coreelec_*_aarch64_slot.tar</strong> or a stick image <strong>*-am9pro-usb.img.gz</strong></p>')
+    h.append('<form id="firmwareForm"><input type="file" id="firmwareFile" name="file" accept=".tar,.gz" required> '
              '<input type="submit" id="firmwareSubmit" value="Upload Firmware"></form>')
     h.append('<div id="uploadProgress" style="display:none; margin: 15px 0; padding: 12px; background: #f5f5f5; border-radius: 4px;">'
              '<div id="uploadStatus" style="margin-bottom: 8px; font-weight: bold;">Uploading firmware...</div>'
@@ -574,8 +748,8 @@ def render_page(message=''):
             h.append('<p style="color: green;">Firmware file ready for installation: %s</p>' % esc(up_name))
             h.append('<form method="POST" action="host_management"><input type="hidden" name="action" value="update_firmware">'
                      '<input type="submit" value="Install Firmware %s" onclick="return confirm(%s)"></form>'
-                     % (esc(up_version), esc(json.dumps('Install firmware %s into slot %s? Kodi must not be playing.'
-                                                         % (up_version, other(run))))))
+                     % (esc(up_version or up_name), esc(json.dumps('Install firmware %s into slot %s? Kodi must not be playing.'
+                                                         % (up_version or up_name, other(run))))))
         elif not pending:
             h.append('<p style="color: #666;">No firmware file uploaded</p>')
         if pending:
@@ -779,7 +953,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- chunked upload (the Pi webui's protocol) ---
     def chunk_status(self, filename):
-        if not NAME_RE.match(filename):
+        if not accepted(filename):
             return self.json(200, {'received': 0})
         part = part_path(filename)
         name, _ = uploaded()
@@ -791,10 +965,10 @@ class Handler(BaseHTTPRequestHandler):
     def chunk(self):
         filename = self.headers.get('X-Filename', '')
         n = int(self.headers.get('Content-Length') or 0)
-        if not NAME_RE.match(filename):
+        if not accepted(filename):
             self.rfile.read(n)
             return self.json(400, {'success': False,
-                                   'error': 'Filename must match coreelec_<date>_<version>_aarch64_slot.tar'})
+                                   'error': 'Filename must match ' + NAME_HELP})
         try:
             offset = int(self.headers.get('X-Offset', ''))
             total = int(self.headers.get('X-Total', ''))

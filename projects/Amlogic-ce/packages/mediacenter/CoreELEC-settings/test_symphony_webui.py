@@ -119,6 +119,75 @@ def mdns_parser_tests():
         check(True, 'mDNS: compression loop rejected')
 
 
+IMAGE_NAME = 'CoreELEC-Amlogic-no.aarch64-22.0-Symphony_20261027-am9pro-usb.img.gz'
+# The stub installer also records whether the stick's extension came along.
+STUB_X = STUB.replace(b'echo "== slot B verified"',
+                      b'[ -f "$2/extra.tar" ] && cp "$2/extra.tar" "$SYM_FLASH/got-extra.tar"\necho "== slot B verified"')
+
+
+def fat_free_bytes(path):
+    """Free space on a FAT32 image, counted from its FAT (512-byte sectors,
+    one per cluster, as mkfs.fat -s 1 makes it)."""
+    import struct
+    with open(path, 'rb') as f:
+        bs = f.read(512)
+        rsvd, = struct.unpack('<H', bs[14:16]); nfats = bs[16]
+        total, = struct.unpack('<I', bs[32:36]); fatsz, = struct.unpack('<I', bs[36:40])
+        f.seek(rsvd * 512)
+        fat = f.read(fatsz * 512)
+    clusters = (total - rsvd - nfats * fatsz)
+    return sum(1 for c in range(2, clusters + 2) if struct.unpack_from('<I', fat, c * 4)[0] & 0x0FFFFFFF == 0) * 512
+
+
+def stick_image(installer=STUB_X, payload=None, extra=b'X' * 5000, drop=None):
+    """A stick image as am9usb makes one: an MBR, a FAT32 boot partition with
+    slot A (kernel_A.img, SYSTEM_A, SLOT_A.manifest, am9slot.sh,
+    SLOT_A.extra.tar) beside other boot files, and a Linux partition; gzipped.
+    SYSTEM_A is written FRAGMENTED (into the hole a deleted file left), so
+    the reader has to follow its cluster chain."""
+    import gzip
+    payload = payload or bytes(range(256)) * 2000          # 512000 bytes, not all zero
+    files = {'kernel_A.img': b'K' * 1000, 'am9slot.sh': installer, 'SLOT_A.extra.tar': extra,
+             'SLOT_A.manifest': ('VERSION=%s\nBUILD_ID=%s\nCOREELEC_VERSION=cv\nam9slot_sha256=%s\n'
+                                 % (VER, 'b' * 40, hashlib.sha256(installer).hexdigest())).encode()}
+    if drop:
+        del files[drop]
+    d = tempfile.mkdtemp()
+    fat = os.path.join(d, 'fat.img')
+    fat_mb = 40
+    subprocess.run(['mkfs.fat', '-F', '32', '-s', '1', '-n', 'COREELEC', '-C', fat, str(fat_mb * 1024)],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    def mcopy(name, data):
+        src = os.path.join(d, 'src')
+        open(src, 'wb').write(data)
+        subprocess.run(['mcopy', '-i', fat, src, '::' + name], check=True,
+                       env=dict(os.environ, MTOOLS_SKIP_CHECK='1'))
+    mcopy('cfgload', b'C' * 3000)
+    for k, v in files.items():
+        mcopy(k, v)
+    # mtools allocates after the last cluster it used, so a hole alone is not
+    # reused: fill the disk to just short of what SYSTEM_A needs beyond the
+    # hole, free the hole, and SYSTEM_A has to wrap into it - fragmented.
+    hole = 100000
+    mcopy('hole.bin', b'H' * hole)
+    mcopy('dtb.img', b'D' * 84000)
+    free = fat_free_bytes(fat)
+    mcopy('filler.bin', b'F' * (free - (len(payload) - hole) - 8 * 512))
+    subprocess.run(['mdel', '-i', fat, '::hole.bin'], check=True, env=dict(os.environ, MTOOLS_SKIP_CHECK='1'))
+    mcopy('SYSTEM_A', payload)
+    fat_bytes = open(fat, 'rb').read()
+    start = 2048
+    n1 = len(fat_bytes) // 512
+    n2 = 2048
+    mbr = bytearray(512)
+    import struct
+    mbr[446:462] = bytes([0, 0, 0, 0, 0x0c, 0, 0, 0]) + struct.pack('<II', start, n1)
+    mbr[462:478] = bytes([0, 0, 0, 0, 0x83, 0, 0, 0]) + struct.pack('<II', start + n1, n2)
+    mbr[510:512] = b'\x55\xaa'
+    raw = bytes(mbr) + b'\0' * (start * 512 - 512) + fat_bytes + b'E' * (n2 * 512)
+    return gzip.compress(raw, 1), payload
+
+
 def main():
     mdns_parser_tests()
     tmp = tempfile.mkdtemp()
@@ -249,6 +318,40 @@ def main():
         upload(bundle(extra={'stray.bin': b'x'}))
         s = install_and_wait()
         check(s.get('state') == 'error' and 'stray.bin' in s.get('error', ''), 'other extra members still refused')
+
+        # A stick image, the way the Pi webui takes a full disk image: slot A
+        # is read out of its FAT32 partition and installed like a bundle.
+        img, payload = stick_image()
+        st, j = upload(img, name=IMAGE_NAME)
+        check(st == 200 and j.get('done') is True, 'stick image upload accepted (%s)' % j)
+        page = req('/host_management')[1].decode()
+        check('Install Firmware ' + IMAGE_NAME in page, 'page offers Install for the image, by name')
+        s = install_and_wait()
+        check(s.get('state') == 'done', 'stick image installs (%s)' % s.get('error', ''))
+        check(open(os.path.join(flash, 'SYSTEM_B'), 'rb').read() == payload,
+              'SYSTEM taken from the image byte for byte (fragmented on the FAT)')
+        check(open(os.path.join(flash, 'got-extra.tar'), 'rb').read() == b'X' * 5000,
+              "the stick's SLOT_A.extra.tar arrives as the bundle's extra.tar")
+        check(s.get('version') == VER, 'install status names the version from the image manifest')
+        check(not os.path.exists(os.path.join(data, 'webstage', '.fat.img')), 'the extracted partition is removed')
+        log = req('/install_log')[1].decode()
+        check("== reading the stick image's boot partition" in log and '== taking slot A out of it' in log,
+              'install log shows the image steps')
+
+        img, _ = stick_image(drop='SLOT_A.manifest')
+        upload(img, name=IMAGE_NAME)
+        s = install_and_wait()
+        check(s.get('state') == 'error' and 'not a Symphony stick image' in s.get('error', ''),
+              'an image without slot A is refused (%s)' % s.get('error', ''))
+
+        import gzip as _gz
+        upload(_gz.compress(b'not a disk at all' * 100), name=IMAGE_NAME)
+        s = install_and_wait()
+        check(s.get('state') == 'error' and 'not a disk image' in s.get('error', ''),
+              'a .img.gz that is no disk image is refused (%s)' % s.get('error', ''))
+
+        st, j = chunk('CoreELEC-something.img.gz', 0, 10, b'x' * 10)
+        check(st == 400, 'an image name without -am9pro-usb is refused')
 
         failing = STUB.replace(b'cp "$2/SYSTEM"', b'echo "am9slot: Kodi is playing - refusing" >&2; exit 1; cp "$2/SYSTEM"')
         upload(bundle(installer=failing))

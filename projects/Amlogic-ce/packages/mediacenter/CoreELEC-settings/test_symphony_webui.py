@@ -126,25 +126,32 @@ STUB_X = STUB.replace(b'echo "== slot B verified"',
 
 
 def fat_free_bytes(path):
-    """Free space on a FAT32 image, counted from its FAT (512-byte sectors,
-    one per cluster, as mkfs.fat -s 1 makes it)."""
+    """Free space on a FAT16/FAT32 image, counted from its FAT."""
     import struct
     with open(path, 'rb') as f:
         bs = f.read(512)
-        rsvd, = struct.unpack('<H', bs[14:16]); nfats = bs[16]
-        total, = struct.unpack('<I', bs[32:36]); fatsz, = struct.unpack('<I', bs[36:40])
-        f.seek(rsvd * 512)
-        fat = f.read(fatsz * 512)
-    clusters = (total - rsvd - nfats * fatsz)
-    return sum(1 for c in range(2, clusters + 2) if struct.unpack_from('<I', fat, c * 4)[0] & 0x0FFFFFFF == 0) * 512
+        bps, spc, rsvd, nfats = struct.unpack('<HBHB', bs[11:17])
+        rootent, tot16 = struct.unpack('<HH', bs[17:21]); fatsz16, = struct.unpack('<H', bs[22:24])
+        tot32, = struct.unpack('<I', bs[32:36])
+        fatsz = fatsz16 or struct.unpack('<I', bs[36:40])[0]
+        f.seek(rsvd * bps)
+        fat = f.read(fatsz * bps)
+    data = rsvd + nfats * fatsz + (-(-rootent * 32 // bps) if fatsz16 else 0)
+    clusters = ((tot16 or tot32) - data) // spc
+    if fatsz16:
+        used = lambda c: struct.unpack_from('<H', fat, c * 2)[0]
+    else:
+        used = lambda c: struct.unpack_from('<I', fat, c * 4)[0] & 0x0FFFFFFF
+    return sum(1 for c in range(2, clusters + 2) if used(c) == 0) * spc * bps
 
 
-def stick_image(installer=STUB_X, payload=None, extra=b'X' * 5000, drop=None):
+def stick_image(installer=STUB_X, payload=None, extra=b'X' * 5000, drop=None, fat_bits=16):
     """A stick image as am9usb makes one: an MBR, a FAT32 boot partition with
     slot A (kernel_A.img, SYSTEM_A, SLOT_A.manifest, am9slot.sh,
     SLOT_A.extra.tar) beside other boot files, and a Linux partition; gzipped.
     SYSTEM_A is written FRAGMENTED (into the hole a deleted file left), so
-    the reader has to follow its cluster chain."""
+    the reader has to follow its cluster chain. fat_bits=16 is what a real
+    stick has (CoreELEC's boot partition, type 0x0c but FAT16); 32 too."""
     import gzip
     payload = payload or bytes(range(256)) * 2000          # 512000 bytes, not all zero
     files = {'kernel_A.img': b'K' * 1000, 'am9slot.sh': installer, 'SLOT_A.extra.tar': extra,
@@ -155,7 +162,8 @@ def stick_image(installer=STUB_X, payload=None, extra=b'X' * 5000, drop=None):
     d = tempfile.mkdtemp()
     fat = os.path.join(d, 'fat.img')
     fat_mb = 40
-    subprocess.run(['mkfs.fat', '-F', '32', '-s', '1', '-n', 'COREELEC', '-C', fat, str(fat_mb * 1024)],
+    subprocess.run(['mkfs.fat', '-F', str(fat_bits), '-s', '1' if fat_bits == 32 else '4', '-n', 'COREELEC',
+                    '-C', fat, str(fat_mb * 1024)],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     def mcopy(name, data):
         src = os.path.join(d, 'src')
@@ -172,7 +180,7 @@ def stick_image(installer=STUB_X, payload=None, extra=b'X' * 5000, drop=None):
     mcopy('hole.bin', b'H' * hole)
     mcopy('dtb.img', b'D' * 84000)
     free = fat_free_bytes(fat)
-    mcopy('filler.bin', b'F' * (free - (len(payload) - hole) - 8 * 512))
+    mcopy('filler.bin', b'F' * (free - (len(payload) - hole) - 8 * 2048))
     subprocess.run(['mdel', '-i', fat, '::hole.bin'], check=True, env=dict(os.environ, MTOOLS_SKIP_CHECK='1'))
     mcopy('SYSTEM_A', payload)
     fat_bytes = open(fat, 'rb').read()
@@ -337,6 +345,13 @@ def main():
         log = req('/install_log')[1].decode()
         check("== reading the stick image's boot partition" in log and '== taking slot A out of it' in log,
               'install log shows the image steps')
+
+        # FAT32 as well (the 0x0c type byte's own meaning).
+        img, payload = stick_image(fat_bits=32)
+        upload(img, name=IMAGE_NAME)
+        s = install_and_wait()
+        check(s.get('state') == 'done' and open(os.path.join(flash, 'SYSTEM_B'), 'rb').read() == payload,
+              'a FAT32 stick image installs too (%s)' % s.get('error', ''))
 
         img, _ = stick_image(drop='SLOT_A.manifest')
         upload(img, name=IMAGE_NAME)

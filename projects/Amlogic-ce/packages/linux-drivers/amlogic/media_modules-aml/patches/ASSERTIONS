@@ -28,3 +28,7 @@ drivers/frame_provider/decoder/utils/vdec.c:vld stream fetch stopped before the 
 # --- 9004: vh265 never re-takes an output/recycled picture as the first frame; output loop bounded ---
 drivers/frame_provider/decoder/h265/vh265.c:if (pic->output_mark &&:1
 drivers/frame_provider/decoder/h265/vh265.c:output loop bound hit:1
+# --- 9006: the progressive-VC-1 frame copy is cache-coherent and precedes the buffer release ---
+drivers/frame_provider/decoder/vc1/vvc1.c:codec_mm_dma_flush(src, size, DMA_FROM_DEVICE);:1
+drivers/frame_provider/decoder/vc1/vvc1.c:codec_mm_dma_flush(dst, size, DMA_TO_DEVICE);:1
+drivers/frame_provider/decoder/vc1/vvc1.c:the copy has been taken from it:1

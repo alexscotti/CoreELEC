@@ -1,0 +1,56 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: vvc1: keep the CPU frame copy coherent with the decoder and the display
+
+For progressive VC-1 the driver copies every decoded frame from the decode
+buffer into one of 32 copy buffers with memcpy (033e2658, "use backup frame
+table ... ucode higher than 3.49"). Both buffers are CMA memory reached
+through codec_mm_phys_to_virt(), which is the cacheable kernel linear map,
+and the copy did no cache maintenance at all: the VDEC had written the source
+by DMA and the VPU reads the copy by DMA, but the CPU read the source through
+whatever it still held in its caches from copying that same buffer four frames
+earlier, and left the copy sitting in cache. It also handed the decode buffer
+back to the firmware (VC1_BUFFERIN) before taking the copy.
+
+On an S905X5M (Ugoos AM9 Pro, Cortex-A510) that shows as short horizontal
+lines on moving VC-1 pictures and never on a paused frame: each line is one
+stale 64-byte cache line, a 32x2 pixel patch of an older frame in the 32x32
+block-mode canvas. Captured off the box with the stock driver in 10 of 120
+frames of Beerfest; none in 120 with this change. MPEG-2 has no such copy and
+is clean in hardware. H.264 and HEVC never touch this path.
+
+Invalidate the source range before the memcpy, write the copy back to DDR
+after it, and release the decode buffer only once the copy has been taken.
+
+---
+--- a/drivers/frame_provider/decoder/vc1/vvc1.c
++++ b/drivers/frame_provider/decoder/vc1/vvc1.c
+@@ -1187,14 +1187,25 @@
+ 
+ 			hw->vfbuf_use[buffer_index]++;
+ 
++			{
++				void *dst = decoder_bmmu_box_get_virt_addr(mm_blk_handle, buffer_index);
++				void *src = decoder_bmmu_box_get_virt_addr(mm_blk_handle, vf->index);
++				int size = decoder_bmmu_box_get_mem_size(mm_blk_handle, vf->index);
++
++				/* The decoder wrote this frame by DMA: drop any stale CPU
++				 * cache lines before reading it, and write the copy back
++				 * to DDR before the display (also DMA) reads it. */
++				codec_mm_dma_flush(src, size, DMA_FROM_DEVICE);
++				memcpy(dst, src, size);
++				codec_mm_dma_flush(dst, size, DMA_TO_DEVICE);
++			}
++
++			/* Hand the decode buffer back to the firmware only after
++			 * the copy has been taken from it. */
+ 			if (--hw->vfbuf_use[vf->index] == 0) {
+ 				WRITE_VREG(VC1_BUFFERIN, ~(1 << vf->index));
+ 				hw->buf_use[vf->index]--;
+ 			}
+-
+-			memcpy(decoder_bmmu_box_get_virt_addr(mm_blk_handle, buffer_index),
+-			       decoder_bmmu_box_get_virt_addr(mm_blk_handle, vf->index),
+-			       decoder_bmmu_box_get_mem_size(mm_blk_handle, vf->index));
+ 			vf->canvas0Addr = vf->canvas1Addr = index2canvas(buffer_index);
+ 			if (is_support_vdec_canvas()) {
+ 				vf->canvas0Addr = vf->canvas1Addr = -1;

@@ -155,3 +155,6 @@ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c:			TVIN_SIG_FMT_HDMI_1920X1080P_24HZ_
 drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c:module_param(aud_fmt_settle_ms, uint, 0644);:1
 drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c:mod_delayed_work(system_wq, &aud_settle_work,:1
 drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c:module_param(aud_fmt_settle_any, uint, 0644);:1
+
+# --- 9011: frame-packed MVC, VD2 reads its eye linearly, not through AFBC ---
+drivers/media/video_sink/video_hw.c:				(vd_layer[1].vd_afbc_reg.afbc_top_ctrl,:1

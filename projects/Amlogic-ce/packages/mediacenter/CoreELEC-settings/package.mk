@@ -15,9 +15,10 @@ PKG_MAKE_OPTS_TARGET="DISTRONAME=${DISTRONAME} \
                       ROOT_PASSWORD=${ROOT_PASSWORD}"
 
 post_makeinstall_target() {
-  # Symphony: scripts/symphony-hostname names the box
+  # Symphony: on an A/B slot stick, scripts/symphony-hostname names the box
   # symphony-coreelec-<channel> from a SYMPHONY USB stick (0 without one), and
-  # patches/ keeps the add-on from resetting it to CoreELEC at Kodi start.
+  # patches/ keeps the add-on from resetting it to CoreELEC at Kodi start. An
+  # install updated with the tar keeps CoreELEC's hostname.
   sh ${PKG_DIR}/test_symphony_hostname.sh
   # scripts/symphony-webui is the box's Host Management page (port 80): upload
   # an A/B slot bundle, install it into the other slot, reboot, go back.

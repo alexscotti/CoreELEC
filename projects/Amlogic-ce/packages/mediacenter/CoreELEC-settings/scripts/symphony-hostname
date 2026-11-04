@@ -8,6 +8,12 @@
 # directory, and 0 when there is no such stick. Avahi publishes the result as
 # symphony-coreelec-<channel>.local.
 #
+# Only on a Symphony install: an A/B slot stick, which cfgload boots with
+# SYSTEM_IMAGE=SYSTEM_A or SYSTEM_B. A CoreELEC install moved to this build
+# with its update tar (/storage/.update) boots SYSTEM and keeps CoreELEC's own
+# hostname: this script leaves it alone, and the settings add-on (patch 0001)
+# behaves as it does upstream.
+#
 # Runs once per boot, after network-base-setup has applied the hostname cached
 # in /storage/.cache/hostname and before avahi and Kodi start, so both see the
 # final name. The CoreELEC settings add-on re-applies its own hostname when
@@ -18,6 +24,16 @@
 ROOT="${SYMPHONY_HOSTNAME_ROOT:-}"
 WAIT="${SYMPHONY_HOSTNAME_WAIT:-20}"
 ROLE="coreelec"
+
+# The same test the patched settings add-on makes. init strips a leading /.
+case " $(cat "${ROOT}/proc/cmdline" 2>/dev/null) " in
+  *" SYSTEM_IMAGE=SYSTEM_A "* | *" SYSTEM_IMAGE=SYSTEM_B "* | \
+  *" SYSTEM_IMAGE=/SYSTEM_A "* | *" SYSTEM_IMAGE=/SYSTEM_B "*) ;;
+  *)
+    echo "symphony-hostname: not an A/B slot stick, the hostname is CoreELEC's"
+    exit 0
+    ;;
+esac
 
 # Where a stick can be: /flash is this box's own boot stick (its FAT
 # partition), and udevil mounts every other USB filesystem under /var/media.

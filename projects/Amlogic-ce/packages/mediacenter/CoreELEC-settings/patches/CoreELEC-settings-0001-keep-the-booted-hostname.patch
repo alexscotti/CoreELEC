@@ -1,6 +1,6 @@
 --- a/src/resources/lib/modules/system.py
 +++ b/src/resources/lib/modules/system.py
-@@ -368,7 +368,16 @@
+@@ -368,7 +368,23 @@
              if not value is None:
                  self.struct['ident']['settings']['hostname']['value'] = value
              else:
@@ -9,9 +9,16 @@
 +                # booted with -- symphony-hostname.service names it
 +                # symphony-coreelec-<channel> before Kodi starts -- instead of
 +                # resetting it to the distribution name on every Kodi start.
++                # Only on an A/B slot stick (SYSTEM_IMAGE=SYSTEM_A|B), the same
++                # test symphony-hostname makes: a CoreELEC install moved to
++                # this build with its update tar behaves as upstream.
++                value = ''
 +                try:
-+                    with open('/proc/sys/kernel/hostname') as booted:
-+                        value = booted.read().strip()
++                    with open('/proc/cmdline') as cmdline:
++                        slot_stick = re.search(r'(^|\s)SYSTEM_IMAGE=/?SYSTEM_[AB](\s|$)', cmdline.read())
++                    if slot_stick:
++                        with open('/proc/sys/kernel/hostname') as booted:
++                            value = booted.read().strip()
 +                except OSError:
 +                    value = ''
 +                self.struct['ident']['settings']['hostname']['value'] = value or self.oe.DISTRIBUTION

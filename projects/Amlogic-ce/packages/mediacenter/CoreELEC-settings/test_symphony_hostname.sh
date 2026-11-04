@@ -1,16 +1,20 @@
 #!/bin/sh
 # Run by the CoreELEC-settings package before it installs symphony-hostname:
-# the channel comes from a SYMPHONY stick, and every way of not having one
-# falls back to channel 0.
+# on an A/B slot stick the channel comes from a SYMPHONY stick, and every way
+# of not having one falls back to channel 0; on a CoreELEC install updated with
+# the tar (no slot on the kernel command line) the hostname is left alone.
 
 SCRIPT="$(dirname "$0")/scripts/symphony-hostname"
 fails=0
 
 # check <description> <expected hostname> <setup commands, run in the fake root>
+# The fake root boots slot A unless the setup writes its own proc/cmdline.
 check() {
   root="$(mktemp -d)"
   mkdir -p "${root}/flash" "${root}/var/media" "${root}/storage/.cache" \
            "${root}/proc/sys/kernel"
+  echo "BOOT_IMAGE=kernel_A.img SYSTEM_IMAGE=SYSTEM_A boot=LABEL=COREELEC disk=LABEL=STORAGE" \
+    >"${root}/proc/cmdline"
   (cd "${root}" && sh -c "$3")
   SYMPHONY_HOSTNAME_ROOT="${root}" SYMPHONY_HOSTNAME_WAIT=0 \
     sh "${SCRIPT}" >/dev/null
@@ -42,5 +46,18 @@ check "CRLF and spaces around the digit" symphony-coreelec-7 \
   "mkdir -p var/media/STICK/SYMPHONY && printf ' 7 \r\n' >var/media/STICK/SYMPHONY/channel"
 check "replaces the cached CoreELEC name" symphony-coreelec-2 \
   "echo CoreELEC >storage/.cache/hostname && mkdir -p var/media/S/SYMPHONY && echo 2 >var/media/S/SYMPHONY/channel"
+check "slot B, CE_FLASH, leading slash" symphony-coreelec-4 \
+  "echo 'BOOT_IMAGE=kernel_B.img SYSTEM_IMAGE=/SYSTEM_B boot=LABEL=CE_FLASH' >proc/cmdline && mkdir -p var/media/S/SYMPHONY && echo 4 >var/media/S/SYMPHONY/channel"
+
+# A CoreELEC install updated in place with the tar boots SYSTEM: its own name
+# stays, even with a SYMPHONY stick plugged in.
+nonslot="echo 'BOOT_IMAGE=kernel.img SYSTEM_IMAGE=SYSTEM boot=LABEL=COREELEC disk=LABEL=STORAGE' >proc/cmdline && echo myhost >storage/.cache/hostname && echo myhost >proc/sys/kernel/hostname"
+check "tar install keeps its hostname" myhost "${nonslot}"
+check "tar install ignores a SYMPHONY stick" myhost \
+  "${nonslot} && mkdir -p var/media/S/SYMPHONY && echo 2 >var/media/S/SYMPHONY/channel"
+check "SYSTEM_A only as part of another word is no slot" myhost \
+  "${nonslot} && echo 'SYSTEM_IMAGE=SYSTEM X_SYSTEM_IMAGE=SYSTEM_A' >proc/cmdline"
+check "no SYSTEM_IMAGE at all is no slot" myhost \
+  "${nonslot} && echo 'boot=LABEL=COREELEC' >proc/cmdline"
 
 [ "${fails}" -eq 0 ] || { echo "symphony-hostname: ${fails} test(s) failed"; exit 1; }

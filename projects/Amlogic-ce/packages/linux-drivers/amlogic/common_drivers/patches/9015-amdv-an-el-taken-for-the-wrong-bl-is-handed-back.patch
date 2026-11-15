@@ -1,0 +1,42 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: amdv: an EL taken for a BL it does not belong to is handed back
+
+Found in review, traced in the code: with FLAG_CHECK_ES_PTS set, a BL
+whose dvel_vf_get() returned an EL with another pts logged "not found el"
+and moved on - the EL was neither paired nor put, so each mismatch held
+one EL decoder buffer until the decoder ran out and stalled. The flag is
+off by default; it is the one to set to chase a pairing skew (9012), and
+then it must not wedge the decoder. Both parse paths now put the EL back.
+---
+ drivers/media/enhancement/amdolby_vision/amdv.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhancement/amdolby_vision/amdv.c
+index 7f0d1ba..1c651a4 100644
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -8749,6 +8749,11 @@ int amdv_parse_metadata_v1(struct vframe_s *vf,
+ 					("bl(%p-%lld) not found el(%p-%lld)\n",
+ 					 vf, vf->pts_us64,
+ 					 el_vf, el_vf->pts_us64);
++				/* not this BL's EL: hand it back, or the EL
++				 * decoder runs out of buffers
++				 */
++				if (el_vf)
++					dvel_vf_put(el_vf);
+ 			}
+ 		} else if (toggle_mode == 1) {
+ 			if (debug_dolby & 2)
+@@ -10419,6 +10424,12 @@ int amdv_parse_metadata_v2_stb(struct vframe_s *vf,
+ 					("bl(%p-%lld) not found el(%p-%lld)\n",
+ 					 vf, vf->pts_us64,
+ 					 el_vf, el_vf->pts_us64);
++				/* An EL taken but not this BL's (FLAG_CHECK_ES_PTS):
++				 * it was never handed back, and the EL decoder
++				 * stalled once it ran out of buffers.
++				 */
++				if (el_vf)
++					dvel_vf_put(el_vf);
+ 				/* Its EL is owed from now on: dvel_retire_owed()
+ 				 * counts this BL until it is put.
+ 				 */

@@ -1,0 +1,39 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: hdmitx: the device tree's custom EDID is parsed a byte at a time
+
+Found in review: the custom_edid property parse did sscanf("%02x") into
+custom_EDID_buf[i], a u8, writing an int - 4 bytes per slot, the last one 3
+bytes past the buffer into the struct fields after it. %02hhx writes the
+byte. Inert on this box (live.dtb's custom_edid is empty); fixed in
+hdmitx20 and hdmitx21 alike.
+---
+ drivers/media/vout/hdmitx20/hdmi_tx_main.c | 2 +-
+ drivers/media/vout/hdmitx21/hdmi_tx_main.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/vout/hdmitx20/hdmi_tx_main.c b/drivers/media/vout/hdmitx20/hdmi_tx_main.c
+index 3fc0e28..ed8d777 100644
+--- a/drivers/media/vout/hdmitx20/hdmi_tx_main.c
++++ b/drivers/media/vout/hdmitx20/hdmi_tx_main.c
+@@ -3785,7 +3785,7 @@ static int amhdmitx_get_dt_info(struct platform_device *pdev, struct hdmitx_dev
+ 			while ((i * 2) < strlen(custom_edid)) {
+ 				if (i == sizeof(hdev->tx_comm.custom_EDID_buf))
+ 					break;
+-				sscanf(custom_edid + i * 2, "%02x", &hdev->tx_comm.custom_EDID_buf[i]);
++				sscanf(custom_edid + i * 2, "%02hhx", &hdev->tx_comm.custom_EDID_buf[i]);
+ 				i++;
+ 			}
+ 			if (hdmitx_edid_valid_block_num(hdev->tx_comm.custom_EDID_buf))
+diff --git a/drivers/media/vout/hdmitx21/hdmi_tx_main.c b/drivers/media/vout/hdmitx21/hdmi_tx_main.c
+index 02b4028..50b1dc4 100644
+--- a/drivers/media/vout/hdmitx21/hdmi_tx_main.c
++++ b/drivers/media/vout/hdmitx21/hdmi_tx_main.c
+@@ -4671,7 +4671,7 @@ static int amhdmitx_get_dt_info(struct platform_device *pdev, struct hdmitx_dev
+ 			while ((i * 2) < strlen(custom_edid)) {
+ 				if (i == sizeof(hdev->tx_comm.custom_EDID_buf))
+ 					break;
+-				sscanf(custom_edid + i * 2, "%02x", &hdev->tx_comm.custom_EDID_buf[i]);
++				sscanf(custom_edid + i * 2, "%02hhx", &hdev->tx_comm.custom_EDID_buf[i]);
+ 				i++;
+ 			}
+ 			if (hdmitx_edid_valid_block_num(hdev->tx_comm.custom_EDID_buf))

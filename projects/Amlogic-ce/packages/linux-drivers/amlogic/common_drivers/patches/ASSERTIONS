@@ -170,3 +170,10 @@ drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c:	cancel_delayed_work_sync(&aud_settl
 # --- 9014: the delayed HDR10+ VSIF clear spares a DV VSIF ---------------------
 drivers/media/vout/hdmitx21/hdmi_tx_main.c:	cancel_delayed_work_sync(&hdev->work_hdr_disable);:1
 drivers/media/vout/hdmitx21/hdmi_tx_main.c:		hdr_status_pos = 0;:3
+
+# --- 9015: an EL taken for the wrong BL is handed back (both parse paths) ---
+drivers/media/enhancement/amdolby_vision/amdv.c:					dvel_vf_put(el_vf);:2
+
+# --- 9016: the custom EDID property is parsed a byte at a time ---
+drivers/media/vout/hdmitx21/hdmi_tx_main.c:"%02hhx", &hdev->tx_comm.custom_EDID_buf[i]);:1
+drivers/media/vout/hdmitx20/hdmi_tx_main.c:"%02hhx", &hdev->tx_comm.custom_EDID_buf[i]);:1

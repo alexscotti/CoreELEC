@@ -1,0 +1,72 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: hdmitx21: the delayed HDR10+ VSIF clear does not clear a Dolby Vision
+ VSIF
+
+Found in review, traced in the code. After an HDR10+ -> SDR change the
+zero HDR10+ VSIF is sent (hdr_status_pos = 4) and hdr_disable_work_func,
+1.5s later (9005; an msleep before it), clears the vendor infoframe if
+hdr_status_pos is still 4. hdmitx_set_vsif_pkt sending a Dolby Vision VSIF
+in that window did not touch hdr_status_pos, so a DV title started within
+1.5s of the change lost its VSIF to the delayed clear.
+
+- hdmitx_set_vsif_pkt, for a DV type, sets hdr_status_pos = 0: the VSIF
+  being sent is no longer the zero HDR10+ one.
+- The delayed clear checks and clears under edid_spinlock, the lock the
+  VSIF setters hold.
+- amhdmitx_remove cancels work_hdr_disable (9005 added it without).
+---
+ drivers/media/vout/hdmitx21/hdmi_tx_main.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/drivers/media/vout/hdmitx21/hdmi_tx_main.c b/drivers/media/vout/hdmitx21/hdmi_tx_main.c
+index 3936ba5..02b4028 100644
+--- a/drivers/media/vout/hdmitx21/hdmi_tx_main.c
++++ b/drivers/media/vout/hdmitx21/hdmi_tx_main.c
+@@ -823,11 +823,16 @@ static void hdr_disable_work_func(struct work_struct *work)
+ 	struct hdmitx_dev *hdev =
+ 		container_of(to_delayed_work(work), struct hdmitx_dev,
+ 			     work_hdr_disable);
++	unsigned long flags;
+ 
+ 	/*
+ 	 * disable DRM packets completely ONLY if hdr transfer
+ 	 * feature and color feature still demand SDR.
++	 *
++	 * under the lock the VSIF setters hold, so the check and the clear see
++	 * the same VSIF
+ 	 */
++	spin_lock_irqsave(&hdev->tx_comm.edid_spinlock, flags);
+ 	if (hdr_status_pos == 4) {
+ 		/* zero hdr10+ VSIF being sent - disable it */
+ 		HDMITX_INFO("%s: disable hdr10+ vsif\n", __func__);
+@@ -835,6 +840,7 @@ static void hdr_disable_work_func(struct work_struct *work)
+ 		hdmi_vend_infoframe_rawset(NULL, NULL);
+ 		hdr_status_pos = 0;
+ 	}
++	spin_unlock_irqrestore(&hdev->tx_comm.edid_spinlock, flags);
+ 	if (hdev->hdr_transfer_feature == T_BT709 &&
+ 	    hdev->hdr_color_feature == C_BT709) {
+ 		/* update hdr mode flag */
+@@ -1288,6 +1294,14 @@ static void hdmitx_set_vsif_pkt(enum eotf_type type,
+ 		hdmi_avi_infoframe_config(CONF_AVI_BT2020, hdev->colormetry);
+ 		hdmi_drm_infoframe_set(NULL);
+ 	}
++	/* A DV VSIF replaces an HDR10+ zero VSIF still being sent: it is no longer
++	 * that VSIF, so hdr_disable_work_func's pending clear of it must not
++	 * clear this one (a DV title started within 1.5s of an HDR10+ -> SDR
++	 * change lost its VSIF).
++	 */
++	if (type == EOTF_T_DV_AHEAD || type == EOTF_T_DOLBYVISION ||
++	    type == EOTF_T_LL_MODE)
++		hdr_status_pos = 0;
+ 
+ 	if (vic == HDMI_95_3840x2160p30_16x9 ||
+ 	    vic == HDMI_94_3840x2160p25_16x9 ||
+@@ -5117,6 +5131,7 @@ static int amhdmitx_remove(struct platform_device *pdev)
+ 	hdmitx_unhook_drm(&pdev->dev);
+ 
+ 	cancel_work_sync(&hdev->work_hdr);
++	cancel_delayed_work_sync(&hdev->work_hdr_disable);
+ 	cancel_work_sync(&hdev->work_hdr_unmute);
+ 	hdmitx21_hdcp_exit();
+ 	cancel_delayed_work(&hdev->work_internal_intr);

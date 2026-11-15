@@ -1,0 +1,58 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: hdmitx21: the audio settle does not unmute a path being prepared, or
+ a muted one
+
+Found in review, traced in the code; two problems in 9010's aud_settle_fn:
+
+- The sound driver's prepare (hdmitx_audio_notify_callback: MISC_AUDIO_PREPARE,
+  type CT_PREPARE) mutes the samples while it swaps the output path, and
+  the hdmitx_set_audmode that follows settles again. A settle still pending
+  from the previous format change fired in between and unmuted the unfed
+  path - the burst 9010 exists to remove. It now stays muted while the
+  current type is CT_PREPARE.
+- It unmuted with audio_mute_op(aud_output_en), reading aud_output_en
+  without aud_mute_mutex: an HDCP stream mute or a sysfs mute made
+  concurrently could be overwritten, leaving the hardware unmuted while
+  every path's state said muted. It now unmutes through
+  hdmitx21_audio_mute_op(1, 0), which takes the lock and unmutes only when
+  no path is muted.
+
+The pending settle is also cancelled in hdmitx_uninit.
+---
+ drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c b/drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c
+index 2504c4a..6195ab4 100644
+--- a/drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c
++++ b/drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c
+@@ -1998,8 +1998,20 @@ static void aud_settle_fn(struct work_struct *work)
+ {
+ 	struct hdmitx_dev *hdev = get_hdmitx21_device();
+ 
++	/* A prepare since the format change (the sound driver tearing the path
++	 * down to swap it) muted the samples for the swap; the set_audmode that
++	 * follows settles again. Unmuting here put the unfed path on the wire.
++	 */
++	if (hdev->tx_comm.cur_audio_param.type == CT_PREPARE) {
++		HDMITX_INFO("audio format settled, but a prepare is pending: stay muted\n");
++		return;
++	}
+ 	HDMITX_INFO("audio format settled, unmute allowed\n");
+-	audio_mute_op(hdev->tx_comm.cur_audio_param.aud_output_en);
++	/* Through the path mask, under its lock: reading aud_output_en unlocked
++	 * could overwrite an HDCP stream mute or a sysfs mute made meanwhile.
++	 * Path 0 changes no path; it unmutes only if none is muted.
++	 */
++	hdmitx21_audio_mute_op(1, 0);
+ }
+ 
+ static DECLARE_DELAYED_WORK(aud_settle_work, aud_settle_fn);
+@@ -2196,6 +2208,7 @@ static void hdmitx_uninit(struct hdmitx_hw_common *tx_hw)
+ 	struct hdmitx_dev *hdev = get_hdmitx21_device();
+ 
+ 	free_irq(hdev->irq_hpd, (void *)hdev);
++	cancel_delayed_work_sync(&aud_settle_work);
+ 	HDMITX_DEBUG("power off hdmi, unmux hpd\n");
+ 
+ 	fifo_flow_enable_intrs(0);

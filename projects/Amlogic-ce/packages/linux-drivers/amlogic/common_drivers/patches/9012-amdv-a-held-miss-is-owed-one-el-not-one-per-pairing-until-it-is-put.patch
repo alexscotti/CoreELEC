@@ -1,0 +1,149 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: amdv: a held miss is owed one EL, not one per pairing until it is put
+
+Found in review, traced in the code. 9002 counts every BL in dvel_miss_bl[]
+(less the noel ones) as owed an EL at each pairing, and retires that many
+stale ELs from the head of the EL queue. A miss leaves dvel_miss_bl[] only
+when the BL is put - not when its stale EL has been retired. A pairing
+that comes before that put counts the same miss again: a catch-up vsync
+toggling two frames while the miss BL's put is still deferred by RDMA, or
+the bypass arm (dec_el_exist without pairing), which runs dvel_retire_owed
+for every bypassed BL. The second count retires the NEXT BL's EL, and from
+then on BL n pairs with EL n+1. PTS checking is off by default
+(FLAG_CHECK_ES_PTS), so nothing notices and nothing corrects it: a profile
+7 FEL title composites the wrong residual until it ends. 0013's el_put
+term used to cancel this out; 9002 removed it.
+
+dvel_settled_bl[] records the held misses whose EL has been retired.
+dvel_retire_owed skips them, and marks settled as many of the misses it
+counted as it actually retired ELs for (only those still held). An entry
+leaves the list when its BL is put, when the BL is paired after all
+(dvel_note_miss(.., false, ..)), or on a session reset.
+---
+ .../media/enhancement/amdolby_vision/amdv.c   | 69 ++++++++++++++++++-
+ 1 file changed, 67 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhancement/amdolby_vision/amdv.c
+index 4c41666..7f0d1ba 100644
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -2282,6 +2282,10 @@ static struct vframe_s *dvel_miss_bl[16];
+  * still to come and must not count as owed ELs after a rebase.
+  */
+ static struct vframe_s *dvel_noel_bl[16];
++/* Held misses whose stale EL has already been retired: settled, so they are
++ * not owed again at the next pairing while their put is still to come.
++ */
++static struct vframe_s *dvel_settled_bl[16];
+ static unsigned int dvel_miss_count;
+ module_param(dvel_miss_count, uint, 0444);
+ MODULE_PARM_DESC(dvel_miss_count, "BL frames composited without their EL");
+@@ -2294,6 +2298,43 @@ static void dvel_miss_reset_locked(void)
+ {
+ 	memset(dvel_miss_bl, 0, sizeof(dvel_miss_bl));
+ 	memset(dvel_noel_bl, 0, sizeof(dvel_noel_bl));
++	memset(dvel_settled_bl, 0, sizeof(dvel_settled_bl));
++}
++
++/* caller holds amdv_lock */
++static void dvel_settled_clear_locked(const struct vframe_s *bl)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(dvel_settled_bl); i++)
++		if (dvel_settled_bl[i] == bl)
++			dvel_settled_bl[i] = NULL;
++}
++
++/* caller holds amdv_lock */
++static bool dvel_settled_locked(const struct vframe_s *bl)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(dvel_settled_bl); i++)
++		if (dvel_settled_bl[i] == bl)
++			return true;
++	return false;
++}
++
++/* caller holds amdv_lock */
++static void dvel_settle_locked(struct vframe_s *bl)
++{
++	int i;
++
++	if (dvel_settled_locked(bl))
++		return;
++	for (i = 0; i < ARRAY_SIZE(dvel_settled_bl); i++) {
++		if (!dvel_settled_bl[i]) {
++			dvel_settled_bl[i] = bl;
++			return;
++		}
++	}
+ }
+ 
+ /* caller holds amdv_lock */
+@@ -2307,6 +2348,7 @@ static void dvel_miss_put_locked(struct vframe_s *bl)
+ 	for (i = 0; i < ARRAY_SIZE(dvel_noel_bl); i++)
+ 		if (dvel_noel_bl[i] == bl)
+ 			dvel_noel_bl[i] = NULL;
++	dvel_settled_clear_locked(bl);
+ }
+ 
+ /* caller holds amdv_lock */
+@@ -2358,6 +2400,7 @@ static void dvel_note_miss(struct vframe_s *bl, bool miss, bool count)
+ 	if (!miss) {
+ 		if (i < ARRAY_SIZE(dvel_miss_bl))
+ 			dvel_miss_bl[i] = NULL;
++		dvel_settled_clear_locked(bl);
+ 	} else if (i == ARRAY_SIZE(dvel_miss_bl)) {
+ 		if (free >= 0)
+ 			dvel_miss_bl[free] = bl;
+@@ -2375,17 +2418,25 @@ static void dvel_retire_owed(const char *bl_provider, struct vframe_s *bl)
+ 	unsigned long flags;
+ 	s32 owed;
+ 	int held = 0, n = 0, i;
++	struct vframe_s *owing[ARRAY_SIZE(dvel_miss_bl)];
+ 
+ 	if (!bl_provider)
+ 		return;
+ 
++	/* A held miss is owed once: when its stale EL is retired it is settled,
++	 * and not counted again at the next pairing - which can come before its
++	 * put (a catch-up vsync toggling two frames, the put deferred by RDMA).
++	 * Counted again, it retired the NEXT BL's EL, and from then on every BL
++	 * paired with the EL after its own, with nothing to notice it.
++	 */
+ 	spin_lock_irqsave(&amdv_lock, flags);
+ 	for (i = 0; i < ARRAY_SIZE(dvel_miss_bl); i++) {
+ 		if (!dvel_miss_bl[i] || dvel_miss_bl[i] == bl)
+ 			continue;
+-		if (dvel_noel_locked(dvel_miss_bl[i]))
++		if (dvel_noel_locked(dvel_miss_bl[i]) ||
++		    dvel_settled_locked(dvel_miss_bl[i]))
+ 			continue;
+-		held++;
++		owing[held++] = dvel_miss_bl[i];
+ 	}
+ 	owed = held;
+ 	spin_unlock_irqrestore(&amdv_lock, flags);
+@@ -2399,6 +2450,20 @@ static void dvel_retire_owed(const char *bl_provider, struct vframe_s *bl)
+ 		owed--;
+ 		n++;
+ 	}
++
++	spin_lock_irqsave(&amdv_lock, flags);
++	for (i = 0; i < n; i++) {
++		int j;
++
++		/* only while it is still a held miss: it may have been put since */
++		for (j = 0; j < ARRAY_SIZE(dvel_miss_bl); j++)
++			if (dvel_miss_bl[j] == owing[i])
++				break;
++		if (j < ARRAY_SIZE(dvel_miss_bl))
++			dvel_settle_locked(owing[i]);
++	}
++	spin_unlock_irqrestore(&amdv_lock, flags);
++
+ 	if (n) {
+ 		dvel_retire_count += n;
+ 		pr_info_ratelimited("dvel: %d bl still missing an el - retired %d stale el\n",

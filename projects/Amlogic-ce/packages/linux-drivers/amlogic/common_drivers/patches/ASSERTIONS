@@ -158,3 +158,15 @@ drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c:module_param(aud_fmt_settle_any, uin
 
 # --- 9011: frame-packed MVC, VD2 reads its eye linearly, not through AFBC ---
 drivers/media/video_sink/video_hw.c:				(vd_layer[1].vd_afbc_reg.afbc_top_ctrl,:1
+
+# --- 9012: a held miss is owed one EL (dvel_settled_bl) -----------------------
+drivers/media/enhancement/amdolby_vision/amdv.c:static struct vframe_s *dvel_settled_bl[16];:1
+drivers/media/enhancement/amdolby_vision/amdv.c:			dvel_settle_locked(owing[i]);:1
+
+# --- 9013: the audio settle spares a path being prepared, unmutes via the mask -
+drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c:	if (hdev->tx_comm.cur_audio_param.type == CT_PREPARE) {:1
+drivers/media/vout/hdmitx21/hw/hdmi_tx_hw.c:	cancel_delayed_work_sync(&aud_settle_work);:1
+
+# --- 9014: the delayed HDR10+ VSIF clear spares a DV VSIF ---------------------
+drivers/media/vout/hdmitx21/hdmi_tx_main.c:	cancel_delayed_work_sync(&hdev->work_hdr_disable);:1
+drivers/media/vout/hdmitx21/hdmi_tx_main.c:		hdr_status_pos = 0;:3

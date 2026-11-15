@@ -124,3 +124,8 @@ src/libbluray/bdnav/clpi_parse.c:    if (spn > 0):1
 # --- 41: the DV EL recovery rewind is not counted into the title position ---
 src/libbluray/bluray.c:    uint64_t        el_recover_target_pos;:1
 src/libbluray/bluray.c:                    bd->s_pos += past < size ? past : size;:1
+
+# --- 42: seek time at the DV recovery target, clip infos locked, close drops held BD-J events ---
+src/libbluray/bluray.c:SPN(bd->st0.el_recover_target_pos) : SPN(bd->st0.clip_pos);:1
+src/libbluray/bluray.c:static void _close_bdj(BLURAY *bd, int deliver_held):1
+src/libbluray/bluray.c:    /* under the lock: a BD-J playlist switch frees bd->title on its own thread */:1

@@ -1,0 +1,108 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: bluray: seek time at the DV recovery target, clip infos under the
+ lock, held BD-J events dropped at close
+
+Found in review, traced in the code; three small fixes:
+
+- After a seek on a DV in-mux clip the stream is rewound for the EL
+  (libbluray-04), and _update_time_psr_from_stream read the time at the
+  rewound position: PSR 8, BD_EVENT_SEEK, BDJ_EVENT_SEEK and the BD-J
+  presented time were up to a GOP before the target, so a BD-J application
+  that seeks and then reads its media time saw time jump back. The time
+  is now looked up at the recovery target while the rewind is read
+  (el_recover_target_pos, libbluray-41).
+- bd_get_clip_infos read bd->title without bd->mutex while a BD-J
+  playlist switch frees it on the Java thread. It now holds the lock
+  (recursive) for the read.
+- bd_close delivered the held BD-J timing notifications (libbluray-13) -
+  a stale END_OF_PLAYLIST among them - to the still-running Java threads
+  without bd->mutex, as the disc closed. They are now dropped there;
+  bd_stop_bdj, under the lock, still delivers them.
+---
+ src/libbluray/bluray.c | 36 ++++++++++++++++++++++++++++--------
+ 1 file changed, 28 insertions(+), 8 deletions(-)
+
+diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+index df64868..a30b7d5 100644
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -358,7 +358,11 @@ static uint32_t _update_time_psr_from_stream(BLURAY *bd)
+     if (bd->title && clip) {
+ 
+         uint32_t clip_pkt, clip_time;
+-        nav_clip_packet_search(bd->st0.clip, SPN(bd->st0.clip_pos), &clip_pkt, &clip_time);
++        /* behind a DV EL recovery rewind the stream sits up to a GOP before
++         * the seek target; the time is the target's (PSR 8, the SEEK events) */
++        uint32_t spn = bd->st0.el_recover_target_pos ?
++                       SPN(bd->st0.el_recover_target_pos) : SPN(bd->st0.clip_pos);
++        nav_clip_packet_search(bd->st0.clip, spn, &clip_pkt, &clip_time);
+         if (clip_time >= clip->in_time && clip_time <= clip->out_time) {
+             _update_time_psr(bd, clip_time);
+             return clip_time;
+@@ -1776,9 +1780,17 @@ static void _stop_bdj(BLURAY *bd)
+     }
+ }
+ 
+-static void _close_bdj(BLURAY *bd)
++static void _close_bdj(BLURAY *bd, int deliver_held)
+ {
+-    _bdj_pt_release(bd, 0, 1);
++    if (deliver_held) {
++        _bdj_pt_release(bd, 0, 1);
++    } else {
++        /* closing the disc: nobody will present them, and delivering them
++         * here ran into live Java threads without bd->mutex (a stale
++         * END_OF_PLAYLIST among them) */
++        bd->bdj_pt_count = 0;
++        bd->bdj_pt_head = 0;
++    }
+     if (bd->bdjava != NULL) {
+         bdj_close(bd->bdjava);
+         bd->bdjava = NULL;
+@@ -1917,7 +1929,7 @@ void bd_close(BLURAY *bd)
+         return;
+     }
+ 
+-    _close_bdj(bd);
++    _close_bdj(bd, 0);
+ 
+     _close_m2ts(&bd->st0);
+     _close_preload(&bd->st_ig);
+@@ -3643,7 +3655,7 @@ int bd_start_bdj(BLURAY *bd, const char *start_object)
+ void bd_stop_bdj(BLURAY *bd)
+ {
+     bd_mutex_lock(&bd->mutex);
+-    _close_bdj(bd);
++    _close_bdj(bd, 1);
+     bd_mutex_unlock(&bd->mutex);
+ }
+ 
+@@ -4762,7 +4774,14 @@ void bd_free_bdjo(struct bdjo_data *obj)
+ 
+ int bd_get_clip_infos(BLURAY *bd, unsigned clip, uint64_t *clip_start_time, uint64_t *stream_start_time, uint64_t *pos, uint64_t *duration)
+ {
+-    if (bd && bd->title && bd->title->clip_list.count > clip) {
++    int ret = 0;
++
++    if (!bd)
++        return 0;
++
++    /* under the lock: a BD-J playlist switch frees bd->title on its own thread */
++    bd_mutex_lock(&bd->mutex);
++    if (bd->title && bd->title->clip_list.count > clip) {
+       if (clip_start_time)
+         *clip_start_time = (uint64_t)bd->title->clip_list.clip[clip].title_time << 1;
+       if (stream_start_time)
+@@ -4772,9 +4791,10 @@ int bd_get_clip_infos(BLURAY *bd, unsigned clip, uint64_t *clip_start_time, uint
+       if (duration)
+         *duration = (uint64_t)bd->title->clip_list.clip[clip].duration << 1;
+ 
+-      return 1;
++      ret = 1;
+     }
+-    return 0;
++    bd_mutex_unlock(&bd->mutex);
++    return ret;
+ }
+ 
+ struct mpls_pl *bd_get_title_mpls(BLURAY *bd)

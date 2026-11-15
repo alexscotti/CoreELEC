@@ -17,7 +17,7 @@ src/libbluray/hdmv/hdmv_vm.c:case INSN_BC: p->pc += !!(src & ~dst); break;:1
 # 01 seek limited to title duration
 src/libbluray/bluray.c:if (tick > bd->title->duration):1
 # 02 seek cut-off starting packet
-src/libbluray/bdnav/clpi_parse.c:spn = (entry->coarse[ii].spn_ep & ~0x1FFFF) + entry->fine[jj].spn_ep - 1;:1
+# (02's "spn_ep - 1" is rewritten by 40 as a decrement that stops at 0: asserted there)
 # 03 BD-J jar search fallback
 src/libbluray/bdj/bdj.c:BD_DEBUG(DBG_BDJ, "searching for "BDJ_JARFILE" ...\n");:1
 # 04 DV EL windowed seek recovery
@@ -117,3 +117,10 @@ src/libbluray/bdnav/clpi_parse.c:if (jj > 0) {:1
 # the two below also occur once in pristine 1.5.0: the count (2) is what catches a dropped hunk
 src/libbluray/bdnav/clpi_parse.c:if (cpi->num_stream_pid < 1 || !cpi->entry) {:2
 src/libbluray/bdnav/navigation.c:if (angle > 8) {:2
+
+# --- 40: the one-packet-early entry point lookup does not wrap at SPN 0 ---
+src/libbluray/bdnav/clpi_parse.c:    if (spn > 0):1
+
+# --- 41: the DV EL recovery rewind is not counted into the title position ---
+src/libbluray/bluray.c:    uint64_t        el_recover_target_pos;:1
+src/libbluray/bluray.c:                    bd->s_pos += past < size ? past : size;:1

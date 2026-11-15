@@ -1,0 +1,34 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: clpi: the one-packet-early entry point lookup does not wrap at SPN 0
+
+Found in review, traced in the code. libbluray-02 returns the packet
+before an entry point from clpi_lookup_spn, so the entry point's own
+packet is not cut off after a seek. For an entry point at SPN 0 that
+was 0 - 1 = 0xFFFFFFFF: as a playitem's start_pkt, chapter 1's clip_pkt
+or a time-seek target it lies past the end of the clip, every read
+returns nothing, and playback stops at that seek. Real clips normally
+open with PAT/PMT before their first entry point, which is why it is
+rare. At SPN 0 the lookup now returns 0.
+---
+ src/libbluray/bdnav/clpi_parse.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/libbluray/bdnav/clpi_parse.c b/src/libbluray/bdnav/clpi_parse.c
+index 2e989fd..f253a26 100644
+--- a/src/libbluray/bdnav/clpi_parse.c
++++ b/src/libbluray/bdnav/clpi_parse.c
+@@ -552,7 +552,13 @@ done:
+     if (jj < 0) {
+         jj = 0;
+     }
+-    spn = (entry->coarse[ii].spn_ep & ~0x1FFFF) + entry->fine[jj].spn_ep - 1;
++    spn = (entry->coarse[ii].spn_ep & ~0x1FFFF) + entry->fine[jj].spn_ep;
++    /* one packet early, so the entry point's own packet is not cut off
++     * (libbluray-02) - but an entry point at SPN 0 has no packet before it,
++     * and 0 - 1 wrapped to 0xFFFFFFFF: a start, chapter or seek target past
++     * the end of the clip */
++    if (spn > 0)
++        spn--;
+     return spn;
+ }
+ 

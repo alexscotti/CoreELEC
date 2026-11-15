@@ -1,0 +1,85 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: bluray: the DV EL recovery rewind is not counted into the title
+ position
+
+Found in review, traced in the code. libbluray-04 rewinds the stream up to
+EL_RECOVER_MAX_PKTS (4096 packets, 786KB) before a seek target or a
+windowed playitem's start, so the enhancement layer gets its parameter
+sets and IDR. The title position bd->s_pos was set at the target and then
+advanced by every byte read - the rewound ones too - so after every seek
+on a DV in-mux clip bd_tell / bd_tell_time, playmark and chapter events
+and the chapter lookup ran up to 786KB ahead, and each non-seamless
+playitem entry on such a clip added another rewind with nothing to reset
+it (a 28-item playlist drifts 2-3 s).
+
+BD_STREAM.el_recover_target_pos holds the target's byte position while
+the rewound part is read; bd->s_pos counts only what is read past it.
+The PAT/PMT fine-tune after a seek no longer moves s_pos back for packets
+that lie behind such a rewind either.
+---
+ src/libbluray/bluray.c | 24 ++++++++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+index 099d182..df64868 100644
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -99,6 +99,11 @@ typedef struct {
+      * el_recover_end_pkt == 0 -> inactive. */
+     uint32_t        el_recover_end_pkt;
+     uint16_t        el_recover_pid;
++    /* Byte position of the recovery target. The rewound bytes before it are
++     * not progress through the title: bd->s_pos counts only what is read
++     * past it, or it ran ahead by the rewind (up to 4096 packets) after every
++     * seek and windowed playitem entry. 0 -> nothing to discount. */
++    uint64_t        el_recover_target_pos;
+ 
+     M2TS_FILTER    *m2ts_filter;
+ } BD_STREAM;
+@@ -736,6 +741,7 @@ static uint16_t _clip_dv_el_pid(const NAV_CLIP *clip)
+ static void _init_el_recover(BD_STREAM *st, uint32_t target_pkt)
+ {
+     st->el_recover_end_pkt = 0;
++    st->el_recover_target_pos = 0;
+ 
+     if (target_pkt > 0) {
+         uint16_t el_pid = _clip_dv_el_pid(st->clip);
+@@ -746,6 +752,8 @@ static void _init_el_recover(BD_STREAM *st, uint32_t target_pkt)
+             st->el_recover_pid     = el_pid;
+             st->clip_pos           = (uint64_t)rewind_pkt * 192;
+             st->clip_block_pos     = (st->clip_pos / 6144) * 6144;
++            if (rewind_pkt < target_pkt)
++                st->el_recover_target_pos = (uint64_t)target_pkt * 192;
+             BD_DEBUG(DBG_STREAM, "DV EL recover: pid 0x%04x, rewind SPN %u -> target SPN %u\n",
+                      el_pid, rewind_pkt, target_pkt);
+         }
+@@ -2450,7 +2458,10 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len)
+                     while (st->int_buf_off >= 192 && TS_PID(bd->int_buf + st->int_buf_off - 192) <= HDMV_PID_PCR) {
+                         st->clip_pos -= 192;
+                         st->int_buf_off -= 192;
+-                        bd->s_pos -= 192;
++                        /* behind a DV EL rewind these packets are not before
++                         * the title position, which is the recovery target */
++                        if (!st->el_recover_target_pos)
++                            bd->s_pos -= 192;
+                     }
+                 }
+ 
+@@ -2473,7 +2484,16 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len)
+             out_len += size;
+             st->clip_pos += size;
+             st->int_buf_off += size;
+-            bd->s_pos += size;
++            if (BD_UNLIKELY(st->el_recover_target_pos != 0)) {
++                /* only the part of this chunk past the recovery target */
++                if (st->clip_pos > st->el_recover_target_pos) {
++                    uint64_t past = st->clip_pos - st->el_recover_target_pos;
++                    bd->s_pos += past < size ? past : size;
++                    st->el_recover_target_pos = 0;
++                }
++            } else {
++                bd->s_pos += size;
++            }
+         }
+ 
+         BD_DEBUG(DBG_STREAM, "%d bytes read OK!\n", out_len);

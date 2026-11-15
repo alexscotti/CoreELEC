@@ -1,0 +1,94 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: vmh264: an SL-HDR SEI record is written into a buffer grown to hold
+ it
+
+Found in review, traced in the code. The H.264 SL-HDR SEI path (T.35
+B5 00 3A) wrote an 8-byte header plus the payload at aux_data_buf +
+aux_data_size. That buffer is NULL, or krealloc'd to exactly aux_data_size
+by the aux-data path, and the bound checked only the payload against
+SEI_ITU_DATA_SIZE - not the 8-byte header, nor the allocation. So the
+first such record wrote near NULL or past the end of a slab object, in
+the decoder's IRQ thread.
+
+The buffer is now krealloc'd (GFP_ATOMIC) to hold the whole record,
+header and padding included, before anything is written; a record that
+would take the total past SEI_ITU_DATA_SIZE, or an allocation failure,
+skips the record. The padding is zeroed.
+---
+ .../decoder/h264_multi/vmh264.c               | 63 +++++++++++--------
+ 1 file changed, 38 insertions(+), 25 deletions(-)
+
+diff --git a/drivers/frame_provider/decoder/h264_multi/vmh264.c b/drivers/frame_provider/decoder/h264_multi/vmh264.c
+index 456da33..7f1ef64 100644
+--- a/drivers/frame_provider/decoder/h264_multi/vmh264.c
++++ b/drivers/frame_provider/decoder/h264_multi/vmh264.c
+@@ -7462,31 +7462,44 @@ static int parse_one_sei_record(struct vdec_h264_hw_s *hw,
+ 					#define SEI_DATA_HEADER     0x8
+ 					#define AUX_TAG_SEI         0x2
+ 
+-					user_data_buf = pic->aux_data_buf + pic->aux_data_size;
+-
+-					user_data_buf[0] = (payload_size >> 24) & 0xff;
+-					user_data_buf[1] = (payload_size >> 16) & 0xff;
+-					user_data_buf[2] = (payload_size >> 8) & 0xff;
+-					user_data_buf[3] = (payload_size >> 0) & 0xff;
+-					user_data_buf[4] = AUX_TAG_SEI;
+-					user_data_buf[5] = 0;
+-					user_data_buf[6] = 0;
+-					user_data_buf[7] = 0;
+-
+-					user_data_buf = user_data_buf + SEI_DATA_HEADER;
+-					for (i = 0; i < payload_size; i++) {
+-						if (pic->aux_data_size + i >= SEI_ITU_DATA_SIZE)
+-							break; // Avoid out-of-bound writing
+-						user_data_buf[i] = p_sei[i];
+-					}
+-
+-					data_len = payload_size + SEI_DATA_HEADER;
+-					if (data_len % 8)
+-						data_len = ((data_len + 8) >> 3) << 3;
+-
+-					pic->aux_data_size += data_len;
+-					if (pic->aux_data_size >= SEI_ITU_DATA_SIZE)
+-						pic->aux_data_size = SEI_ITU_DATA_SIZE;
++					do {
++						/* aux_data_buf is NULL or krealloc'd to exactly
++						 * aux_data_size: grow it to hold this record (its
++						 * 8-byte header, the payload, the padding) before
++						 * writing, or skip the record. The old bound looked
++						 * at the payload alone and at SEI_ITU_DATA_SIZE, not
++						 * at the allocation, and wrote past it.
++						 */
++						data_len = payload_size + SEI_DATA_HEADER;
++						if (data_len % 8)
++							data_len = ((data_len + 8) >> 3) << 3;
++						if (payload_size <= 0 ||
++						    pic->aux_data_size + data_len > SEI_ITU_DATA_SIZE) {
++							dpb_print(DECODE_ID(hw), PRINT_FLAG_SEI_DETAIL,
++								"SL-HDR record of %d bytes does not fit, skipped\n",
++								payload_size);
++							break;
++						}
++						user_data_buf = krealloc(pic->aux_data_buf,
++							pic->aux_data_size + data_len, GFP_ATOMIC);
++						if (!user_data_buf)
++							break;
++						pic->aux_data_buf = user_data_buf;
++						user_data_buf = pic->aux_data_buf + pic->aux_data_size;
++						memset(user_data_buf, 0, data_len);
++
++						user_data_buf[0] = (payload_size >> 24) & 0xff;
++						user_data_buf[1] = (payload_size >> 16) & 0xff;
++						user_data_buf[2] = (payload_size >> 8) & 0xff;
++						user_data_buf[3] = (payload_size >> 0) & 0xff;
++						user_data_buf[4] = AUX_TAG_SEI;
++
++						user_data_buf = user_data_buf + SEI_DATA_HEADER;
++						for (i = 0; i < payload_size; i++)
++							user_data_buf[i] = p_sei[i];
++
++						pic->aux_data_size += data_len;
++					} while (0);
+ 
+ 					if (dpb_is_debug(DECODE_ID(hw),
+ 						PRINT_FLAG_SEI_DETAIL)) {

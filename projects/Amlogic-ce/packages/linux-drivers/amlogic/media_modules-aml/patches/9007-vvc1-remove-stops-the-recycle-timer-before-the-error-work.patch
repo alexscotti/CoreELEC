@@ -1,0 +1,52 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: vvc1: remove() stops the recycle timer before it cancels the error
+ work
+
+Found in review, traced in the code. amvdec_vc1_remove() cancelled
+error_wd_work first and deleted the recycle timer only after amvdec_stop()
+and the IRQ free. The timer is what queues that work (VC1_SOS_COUNT > 10,
+the decoder's error state), so it could queue it again in between, and
+error_do_work then ran after remove: amvdec_stop, vf_light_unreg_provider,
+vvc1_local_init (canvases on the buffers decoder_bmmu_box_free has freed),
+vf_reg_provider, amvdec_start - firmware DMA into freed CMA, a reset of the
+next decoder on VDEC_1, and a stale provider registered. Closing a VC-1
+title while it was in that error state was enough.
+
+The timer is now deleted first, then the work cancelled: nothing can queue
+it again.
+---
+ drivers/frame_provider/decoder/vc1/vvc1.c | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/frame_provider/decoder/vc1/vvc1.c b/drivers/frame_provider/decoder/vc1/vvc1.c
+index cf1a0d8..e66bfde 100644
+--- a/drivers/frame_provider/decoder/vc1/vvc1.c
++++ b/drivers/frame_provider/decoder/vc1/vvc1.c
+@@ -1896,6 +1896,15 @@ static int amvdec_vc1_probe(struct platform_device *pdev)
+ 
+ static int amvdec_vc1_remove(struct platform_device *pdev)
+ {
++	/* The recycle timer is what queues error_wd_work (VC1_SOS_COUNT > 10),
++	 * so it goes first: cancelled before it, the work could be queued again
++	 * and run after this - restarting the firmware on freed buffers, with
++	 * the provider registered again.
++	 */
++	if (stat & STAT_TIMER_ARM) {
++		del_timer_sync(&recycle_timer);
++		stat &= ~STAT_TIMER_ARM;
++	}
+ 	cancel_work_sync(&error_wd_work);
+ 	vc1_print(0, VC1_DEBUG_DETAIL,"%s \n", __func__);
+ 	if (stat & STAT_VDEC_RUN) {
+@@ -1909,11 +1918,6 @@ static int amvdec_vc1_remove(struct platform_device *pdev)
+ 		stat &= ~STAT_ISR_REG;
+ 	}
+ 
+-	if (stat & STAT_TIMER_ARM) {
+-		del_timer_sync(&recycle_timer);
+-		stat &= ~STAT_TIMER_ARM;
+-	}
+-
+ 	cancel_work_sync(&set_clk_work);
+ 	if (stat & STAT_VF_HOOK) {
+ 		if (!is_reset)

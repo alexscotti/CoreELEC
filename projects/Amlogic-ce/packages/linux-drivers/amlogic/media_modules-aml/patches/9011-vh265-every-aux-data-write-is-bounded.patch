@@ -1,0 +1,64 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: vh265: every aux data write is bounded, and pic_transfer's buffer is
+ the size bounded
+
+Found in review, traced in the code; three problems in the HEVC aux data
+(SEI / DV metadata) path:
+
+- set_aux_data checked the room left only at the start (aux_count, without
+  the 8-byte record headers) and at a record boundary, so a long record
+  after a run of small ones wrote past AUX_DATA_SIZE1. Every 4-byte write
+  is now checked, leaving room for a following record's header.
+- pic_transfer's aux buffer was vzalloc'd at prefix_aux_size (16KB) while
+  set_aux_data bounds every buffer by AUX_DATA_SIZE1 (24KB). It is now
+  allocated at least that size.
+- When that allocation failed, the pic_alloc'd PIC_s was vfree'd (it is
+  aml_media_mem_alloc'd) and pic_transfer was left pointing at it. It is
+  freed with pic_free and cleared.
+
+All need a malformed or crafted stream; not reached by a normal title.
+---
+ drivers/frame_provider/decoder/h265/vh265.c | 21 +++++++++++++++++++--
+ 1 file changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/frame_provider/decoder/h265/vh265.c b/drivers/frame_provider/decoder/h265/vh265.c
+index 794ea9d..466c70f 100644
+--- a/drivers/frame_provider/decoder/h265/vh265.c
++++ b/drivers/frame_provider/decoder/h265/vh265.c
+@@ -6920,6 +6920,16 @@ static void set_aux_data(struct hevc_state_s *hevc,
+ 			for (i = 0; i < aux_count; i += 4) {
+ 				int ii;
+ 				unsigned char tag = aux_adr[i + 3] >> 8;
++
++				/* The checks above and at a record boundary leave a
++				 * long record unbounded: every write is checked here.
++				 * 8 more for a following record's header.
++				 */
++				if ((char *)p + 4 + 8 > pic->aux_data_buf + AUX_DATA_SIZE1) {
++					hevc_print(hevc, 0, "%s, aux record cut at %d of %d\n",
++						__func__, i, aux_count);
++					break;
++				}
+ 				if (tag != 0 && tag != 0xff) {
+ 					if (dv_meta_flag == 0)
+ 						valid_tag = 1;
+@@ -8476,10 +8486,17 @@ static int hevc_local_init(struct hevc_state_s *hevc)
+ 				pr_err("%s: failed to alloc for pic_transfer\n", __func__);
+ 				return -1;
+ 			}
+-			hevc->pic_transfer->aux_data_buf = vzalloc(hevc->prefix_aux_size);
++			/* set_aux_data() bounds what it writes by AUX_DATA_SIZE1,
++			 * for this buffer as for the pool's: sized by the prefix
++			 * aux size (16KB) it could be overrun by 8KB
++			 */
++			hevc->pic_transfer->aux_data_buf =
++				vzalloc(max_t(u32, hevc->prefix_aux_size, AUX_DATA_SIZE1));
+ 			if (!hevc->pic_transfer->aux_data_buf) {
+ 				pr_err("%s: failed to alloc for aux\n", __func__);
+-				vfree(hevc->pic_transfer);
++				/* pic_alloc's, freed its way; and not left dangling */
++				pic_free(hevc->pic_transfer);
++				hevc->pic_transfer = NULL;
+ 				return -1;
+ 			}
+ 		}

@@ -1,0 +1,68 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: vh264_mvc: remove() stops what queues its works before cancelling
+ them
+
+Found in review, traced in the code. amvdec_h264mvc_remove() cancelled
+alloc_work, error_wd_work and set_clk_work and only then called
+vh264mvc_stop(), which frees the IRQ (that queues alloc_work and
+error_wd_work) and the recycle timer (set_clk_work). A late alloc_work
+then raced decoder_bmmu_box_free and the buffer spec frees, and a late
+error_do_work could run vh264mvc_stop alongside remove's own and restart
+the decoder with vh264mvc_init after it. 9003 narrows the window - its
+case is exactly a close ~55 ms in, the firmware waiting for its buffer
+allocation - but does not close it.
+
+remove() now marks the decoder inactive (error_do_work then restarts
+nothing) and waits for an error_do_work already running, stops the
+firmware, masks and frees the IRQ, deletes the timer, and only then
+cancels the three works and calls vh264mvc_stop for the rest.
+---
+ .../decoder/h264_mvc/vh264_mvc.c              | 28 ++++++++++++++++++-
+ 1 file changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/frame_provider/decoder/h264_mvc/vh264_mvc.c b/drivers/frame_provider/decoder/h264_mvc/vh264_mvc.c
+index b62cde7..94dd220 100644
+--- a/drivers/frame_provider/decoder/h264_mvc/vh264_mvc.c
++++ b/drivers/frame_provider/decoder/h264_mvc/vh264_mvc.c
+@@ -1809,6 +1809,33 @@ static int amvdec_h264mvc_probe(struct platform_device *pdev)
+ static int amvdec_h264mvc_remove(struct platform_device *pdev)
+ {
+ 	pr_info("amvdec_h264mvc_remove\n");
++	/* Stop what queues the works before cancelling them: the ISR queues
++	 * alloc_work and error_wd_work, the recycle timer set_clk_work. Cancelled
++	 * first, a late alloc_work raced decoder_bmmu_box_free and the vfree of
++	 * the buffer specs in vh264mvc_stop, and error_wd_work could run
++	 * vh264mvc_stop alongside this one and restart the decoder after it.
++	 *
++	 * Not active from here, so an error_do_work queued later restarts
++	 * nothing; one already restarting is waited for. Then the firmware stops
++	 * before its interrupt is freed, as in vh264mvc_stop.
++	 */
++	atomic_set(&vh264mvc_active, 0);
++	cancel_work_sync(&error_wd_work);
++	if (stat & STAT_VDEC_RUN) {
++		amvdec_stop();
++		stat &= ~STAT_VDEC_RUN;
++	}
++	if (stat & STAT_ISR_REG) {
++		WRITE_VREG(ASSIST_MBOX1_MASK, 0);
++#ifdef HANDLE_h264mvc_IRQ
++		vdec_free_irq(VDEC_IRQ_1, (void *)vh264mvc_dec_id);
++#endif
++		stat &= ~STAT_ISR_REG;
++	}
++	if (stat & STAT_TIMER_ARM) {
++		del_timer_sync(&recycle_timer);
++		stat &= ~STAT_TIMER_ARM;
++	}
+ 	cancel_work_sync(&alloc_work);
+ 	cancel_work_sync(&error_wd_work);
+ 	cancel_work_sync(&set_clk_work);
+@@ -1816,7 +1843,6 @@ static int amvdec_h264mvc_remove(struct platform_device *pdev)
+ 	frame_width = 0;
+ 	frame_height = 0;
+ 	vdec_source_changed(VFORMAT_H264MVC, 0, 0, 0);
+-	atomic_set(&vh264mvc_active, 0);
+ 
+ #ifdef DEBUG_PTS
+ 	pr_info

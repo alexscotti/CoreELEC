@@ -32,3 +32,19 @@ drivers/frame_provider/decoder/h265/vh265.c:output loop bound hit:1
 drivers/frame_provider/decoder/vc1/vvc1.c:codec_mm_dma_flush(src, size, DMA_FROM_DEVICE);:1
 drivers/frame_provider/decoder/vc1/vvc1.c:codec_mm_dma_flush(dst, size, DMA_TO_DEVICE);:1
 drivers/frame_provider/decoder/vc1/vvc1.c:the copy has been taken from it:1
+
+# --- 9007: vvc1 remove() stops the recycle timer before cancelling the error work ---
+drivers/frame_provider/decoder/vc1/vvc1.c:	 * so it goes first: cancelled before it, the work could be queued again:1
+
+# --- 9008: vh264_mvc remove() stops the IRQ and timer before cancelling the works ---
+drivers/frame_provider/decoder/h264_mvc/vh264_mvc.c:	 * nothing; one already restarting is waited for. Then the firmware stops:1
+
+# --- 9009: the VLD quiesce only touches VDEC_1 while it is powered ---
+drivers/frame_provider/decoder/utils/vdec.c:	    vdec_core->power_ref_count[VDEC_1]):1
+
+# --- 9010: an SL-HDR SEI record is written into a buffer grown to hold it ---
+drivers/frame_provider/decoder/h264_multi/vmh264.c:"SL-HDR record of %d bytes does not fit, skipped\n",:1
+
+# --- 9011: every vh265 aux data write is bounded; pic_transfer sized for the bound ---
+drivers/frame_provider/decoder/h265/vh265.c:aux record cut at %d of %d:1
+drivers/frame_provider/decoder/h265/vh265.c:vzalloc(max_t(u32, hevc->prefix_aux_size, AUX_DATA_SIZE1));:1

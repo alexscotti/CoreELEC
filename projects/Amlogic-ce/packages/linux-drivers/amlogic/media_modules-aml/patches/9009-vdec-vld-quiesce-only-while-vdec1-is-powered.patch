@@ -1,0 +1,33 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: vdec: the VLD quiesce at release only touches VDEC_1 while it is
+ powered
+
+Found in review, traced in the code. 9003's vdec_single_quiesce_vld()
+runs for any vdec that is SINGLE with a VLD input target - which are also
+the zero defaults of a vdec created but never initialised (an HEVC
+non-sched or MPTS port). It wrote VDEC_1 registers with no power check,
+unlike vdec_inactive_core_reset() just before it, which only resets
+VDEC_1 when power_ref_count[VDEC_1] is held. It is now gated the same way.
+---
+ drivers/frame_provider/decoder/utils/vdec.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/frame_provider/decoder/utils/vdec.c b/drivers/frame_provider/decoder/utils/vdec.c
+index a880fcd..23eefe6 100644
+--- a/drivers/frame_provider/decoder/utils/vdec.c
++++ b/drivers/frame_provider/decoder/utils/vdec.c
+@@ -4240,7 +4240,13 @@ void vdec_release(struct vdec_s *vdec)
+ 
+ 	vdec_inactive_core_reset(vdec);
+ 
+-	if (vdec_single(vdec) && vdec->input.target == VDEC_INPUT_TARGET_VLD)
++	/* Only with VDEC_1 powered, as vdec_inactive_core_reset() checks: SINGLE
++	 * and TARGET_VLD are also the zero defaults of a vdec that was created
++	 * but never initialised (an HEVC non-sched or an MPTS port), and its
++	 * registers are not there to write with the domain off.
++	 */
++	if (vdec_single(vdec) && vdec->input.target == VDEC_INPUT_TARGET_VLD &&
++	    vdec_core->power_ref_count[VDEC_1])
+ 		vdec_single_quiesce_vld();
+ 
+ 	if (atomic_read(&vdec_core->vdec_nr) == 1) {

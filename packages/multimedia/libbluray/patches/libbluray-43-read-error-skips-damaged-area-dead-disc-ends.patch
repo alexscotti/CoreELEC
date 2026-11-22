@@ -1,0 +1,251 @@
+From: Alex Scotti <alexscotti@gmail.com>
+Subject: bluray: a read error skips the damaged area in growing steps, a dead
+ disc ends
+
+A failed read of a physical disc costs the drive its own retries, ~10 s
+per attempt on the AM9's drive, and the kernel cannot hand back the good
+part of a bad 4 KiB sector, which overlaps two 6144-byte aligned units.
+_skip_unit skipped one unit per failure, so a damaged area cost one or
+two attempts per 6144 bytes: a 1 MB scratch ~29 min of frozen picture
+(173 attempts), and a dead disc read on for days. bd->s_pos was not
+advanced over the skipped bytes, so bd_tell() and playmarks fell behind
+the stream by every skipped unit.
+
+- A failure now skips 2^n units, n the failures in the run (2 first,
+  which clears the shared sector, then 4, 8, ...), at most 512 (3 MiB).
+  The first unit read whole ends the run; so do a seek and a new
+  playlist. A clip change does not: one damaged area can span clips.
+- A skip stops at the clip's end packet and at a seamless angle change
+  point; the next clip, END_OF_TITLE or the angle change follow there as
+  after any read. Skipped data is not read again and nothing is put in
+  its place (no synthesized units through _validate_unit, whose
+  "encrypted" count would end playback as an AACS error).
+- The skipped bytes advance bd->s_pos (bd_tell, playmarks, the held
+  playitem bytes check in the player); inside a DV EL recovery window
+  only the part past the recovery target counts, as for read bytes
+  (libbluray-41).
+- A run that has cost 75 s (the time between its failures, each gap at
+  most 30 s so a paused player does not count) or skipped 64 MB without
+  a good unit is a dead disc: the read fails (-1, fatal - the player
+  ends playback) and keeps failing until a seek or a new playlist.
+
+Reads that do not fail are untouched: a disc or folder with no read
+error is delivered byte for byte as before. Measured with a fault-
+injecting read() shim (10 s per attempt, projected): one bad sector
+3 -> 2 attempts; 1 MB 173 -> 8 attempts (29 min -> 80 s, 1.0 -> 1.5 MB
+of stream lost); 1 MB across a clip boundary 173 -> 8; a dead disc ends
+after 10 attempts (~100 s) instead of reading on for 21164 attempts.
+---
+ src/libbluray/bluray.c | 151 +++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 147 insertions(+), 4 deletions(-)
+
+diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+index a30b7d5..5ba5e8a 100644
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -59,6 +59,11 @@
+ #include <stdlib.h>
+ #include <inttypes.h>
+ #include <string.h>
++#if defined(_WIN32)
++#include "util/time.h"
++#else
++#include <time.h>
++#endif
+ 
+ 
+ typedef enum {
+@@ -105,6 +110,15 @@ typedef struct {
+      * seek and windowed playitem entry. 0 -> nothing to discount. */
+     uint64_t        el_recover_target_pos;
+ 
++    /* A run of failed reads (a scratched or dirty disc, see _skip_unit):
++     * cleared by the first unit read whole, a seek and a new playlist, not by
++     * a clip change - one damaged area can span clips. */
++    uint32_t        read_error_count;  /* failed reads in the run */
++    uint64_t        read_error_bytes;  /* bytes skipped in the run */
++    uint64_t        read_error_ms;     /* time spent in the run */
++    uint64_t        read_error_last;   /* monotonic ms of the last failed read */
++    uint8_t         read_error_dead;   /* budget spent: reads fail until a seek */
++
+     M2TS_FILTER    *m2ts_filter;
+ } BD_STREAM;
+ 
+@@ -865,16 +879,130 @@ static int _validate_unit(BLURAY *bd, BD_STREAM *st, uint8_t *buf)
+     return 1;
+ }
+ 
++/*
++ * Read errors.
++ *
++ * A failed read of a physical disc costs the drive its own retries, about
++ * 10 s per attempt, and the kernel cannot hand back the good part of a bad
++ * 4 KiB sector, which overlaps two aligned units. Skipping one unit per
++ * failure (as before) paid that once or twice per 6144 bytes of a damaged
++ * area: a 1 MB scratch held the picture for half an hour, and a dead disc
++ * played on, one unit per attempt, for days.
++ *
++ * A failure now skips 2^n units, n the failures in the run (2 units first,
++ * which clears the shared sector), at most READ_ERROR_MAX_SKIP_UNITS, never
++ * past the end of the clip or a seamless angle change point. The first unit
++ * read whole ends the run. A run that has cost READ_ERROR_BUDGET_MS or
++ * skipped READ_ERROR_BUDGET_BYTES without one good unit is a dead disc: the
++ * read fails (-1, fatal) and keeps failing until a seek or a new playlist.
++ * Skipped data is not read again and nothing is synthesized in its place.
++ */
++
++#define READ_ERROR_MAX_SKIP_UNITS  512                 /* 3 MiB */
++#define READ_ERROR_BUDGET_MS       75000
++#define READ_ERROR_BUDGET_BYTES    (64 * 1024 * 1024)
++/* a gap between two failures longer than this is the player paused, not the
++ * drive retrying: it counts this much only */
++#define READ_ERROR_MAX_GAP_MS      30000
++
++static uint64_t _read_error_clock_ms(void)
++{
++#if defined(_WIN32)
++    return bd_get_scr() / 90;
++#else
++    struct timespec ts;
++    if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
++        return 0;
++    }
++    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
++#endif
++}
++
++static void _reset_read_errors(BD_STREAM *st)
++{
++    st->read_error_count = 0;
++    st->read_error_bytes = 0;
++    st->read_error_ms    = 0;
++    st->read_error_last  = 0;
++    st->read_error_dead  = 0;
++}
++
+ static int _skip_unit(BLURAY *bd, BD_STREAM *st)
+ {
+-    const size_t len = 6144;
++    const uint64_t len = 6144;
++    uint64_t now   = _read_error_clock_ms();
++    uint64_t limit = (uint64_t)st->clip->end_pkt * 192;
++    uint64_t skip;
++    unsigned shift;
++
++    if (st->read_error_count > 0) {
++        uint64_t gap = now > st->read_error_last ? now - st->read_error_last : 0;
++        st->read_error_ms += gap < READ_ERROR_MAX_GAP_MS ? gap : READ_ERROR_MAX_GAP_MS;
++    }
++    st->read_error_last = now;
++    st->read_error_count++;
++
++    /* 2, 4, 8, ... units */
++    shift = st->read_error_count < 31 ? st->read_error_count : 31;
++    skip = (uint64_t)1 << shift;
++    if (skip > READ_ERROR_MAX_SKIP_UNITS) {
++        skip = READ_ERROR_MAX_SKIP_UNITS;
++    }
++    skip *= len;
++
++    /* stop at the clip end (the next clip, or the end of the title, follows
++     * as after any read) and at a seamless angle change point */
++    if (st == &bd->st0 && bd->seamless_angle_change) {
++        uint64_t angle_pos = (uint64_t)bd->angle_change_pkt * 192;
++        if (angle_pos > st->clip_pos && angle_pos < limit) {
++            limit = angle_pos;
++        }
++    }
++    if (st->clip_pos >= limit) {
++        skip = len; /* not reached from _bd_read(), as before */
++    } else if (skip > limit - st->clip_pos) {
++        skip = limit - st->clip_pos;
++    }
++
++    st->clip_block_pos += skip;
++    st->clip_pos += skip;
++    if (skip % len) {
++        /* landed on the limit, inside a unit: the stream moves on from
++         * there without reading it */
++        st->clip_block_pos = (st->clip_pos / len) * len;
++    }
++
++    /* the skipped bytes are title progress (bd_tell(), marks) */
++    if (st == &bd->st0) {
++        if (BD_UNLIKELY(st->el_recover_target_pos != 0)) {
++            if (st->clip_pos > st->el_recover_target_pos) {
++                uint64_t past = st->clip_pos - st->el_recover_target_pos;
++                bd->s_pos += past < skip ? past : skip;
++                st->el_recover_target_pos = 0;
++            }
++        } else {
++            bd->s_pos += skip;
++        }
++    }
+ 
+-    /* skip broken unit */
+-    st->clip_block_pos += len;
+-    st->clip_pos += len;
++    st->read_error_bytes += skip;
++
++    BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Read error in %s: skipped %" PRIu64 " bytes to %" PRIu64
++             " (run: %u failed reads, %" PRIu64 " bytes, %" PRIu64 " ms)\n",
++             st->clip->name, skip, st->clip_pos,
++             st->read_error_count, st->read_error_bytes, st->read_error_ms);
+ 
+     _queue_event(bd, BD_EVENT_READ_ERROR, 0);
+ 
++    if (st->read_error_ms >= READ_ERROR_BUDGET_MS ||
++        st->read_error_bytes >= READ_ERROR_BUDGET_BYTES) {
++        BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Read errors in %s: %u failed reads, %" PRIu64 " bytes skipped in %"
++                 PRIu64 " ms without a good unit - giving up\n",
++                 st->clip->name, st->read_error_count, st->read_error_bytes, st->read_error_ms);
++        st->read_error_dead = 1;
++        return -1;
++    }
++
+     /* seek to next unit start */
+     if (file_seek(st->fp, st->clip_block_pos, SEEK_SET) < 0) {
+         BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Unable to seek clip %s!\n", st->clip->name);
+@@ -889,6 +1017,10 @@ static int _read_block(BLURAY *bd, BD_STREAM *st, uint8_t *buf)
+     const size_t len = 6144;
+ 
+     if (st->fp) {
++        if (BD_UNLIKELY(st->read_error_dead)) {
++            return -1;
++        }
++
+         BD_DEBUG(DBG_STREAM, "Reading unit at %" PRIu64 "...\n", st->clip_block_pos);
+ 
+         if (len + st->clip_block_pos <= st->clip_size) {
+@@ -903,6 +1035,13 @@ static int _read_block(BLURAY *bd, BD_STREAM *st, uint8_t *buf)
+                 }
+                 st->clip_block_pos += len;
+ 
++                if (BD_UNLIKELY(st->read_error_count != 0)) {
++                    BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Read errors in %s ended at %" PRIu64 ": %u failed reads, %"
++                             PRIu64 " bytes skipped, %" PRIu64 " ms\n", st->clip->name, st->clip_block_pos - len,
++                             st->read_error_count, st->read_error_bytes, st->read_error_ms);
++                    _reset_read_errors(st);
++                }
++
+                 if ((error = _validate_unit(bd, st, buf)) <= 0) {
+                     /* skip broken unit */
+                     BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Skipping broken unit at %" PRId64 "\n", st->clip_block_pos - len);
+@@ -1075,6 +1214,9 @@ static int64_t _seek_stream(BLURAY *bd, BD_STREAM *st,
+     st->int_buf_off = 6144;
+     st->seek_flag = 1;
+ 
++    /* a new position: a run of read errors behind it is over */
++    _reset_read_errors(st);
++
+     return (uint64_t)clip_pkt * 192;
+ }
+ 
+@@ -2865,6 +3007,7 @@ static int _open_playlist(BLURAY *bd, unsigned playlist, unsigned angle)
+     bd->s_pos = 0;
+     bd->end_of_playlist = 0;
+     bd->st0.ig_pid = 0;
++    _reset_read_errors(&bd->st0);
+ 
+     // Get the initial clip of the playlist
+     bd->st0.clip = nav_next_clip(bd->title, NULL);

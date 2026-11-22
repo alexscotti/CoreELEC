@@ -129,3 +129,9 @@ src/libbluray/bluray.c:                    bd->s_pos += past < size ? past : siz
 src/libbluray/bluray.c:SPN(bd->st0.el_recover_target_pos) : SPN(bd->st0.clip_pos);:1
 src/libbluray/bluray.c:static void _close_bdj(BLURAY *bd, int deliver_held):1
 src/libbluray/bluray.c:    /* under the lock: a BD-J playlist switch frees bd->title on its own thread */:1
+
+# --- 43: a read error skips the damaged area in growing steps, a dead disc ends ---
+src/libbluray/bluray.c:#define READ_ERROR_BUDGET_MS       75000:1
+src/libbluray/bluray.c:_reset_read_errors(:4
+src/libbluray/bluray.c:st->read_error_dead = 1;:1
+src/libbluray/bluray.c:bd->s_pos += skip;:1

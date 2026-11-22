@@ -158,11 +158,13 @@
   # Symphony: our own theater's build (yes) or a public one (no, the default).
   # Every build gets the A/B slots, Host Management, the BD-J JRE, the
   # hostname, symphony-dovi and symphony-defaults; only ours adds the
-  # Symphony skin and symphony-config (this rig's settings).
+  # Symphony skin, symphony-config (this rig's settings) and makemkv
+  # (libmmbd + makemkvcon for AACS2 discs; its license forbids putting it in
+  # an image anyone else gets).
     SYMPHONY_THEATER="${SYMPHONY_THEATER:-no}"
     if [ "${SYMPHONY_THEATER}" = "yes" ]; then
       SKINS+=" Symphony"
-      ADDITIONAL_PACKAGES+=" symphony-config"
+      ADDITIONAL_PACKAGES+=" symphony-config makemkv"
     fi
 
   # TEE supported SoC

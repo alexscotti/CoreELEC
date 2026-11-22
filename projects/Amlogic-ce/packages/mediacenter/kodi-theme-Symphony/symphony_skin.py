@@ -45,7 +45,7 @@ lines does not break it; if the structure itself is gone, the build fails
 here rather than shipping a broken skin.
 
 It also replaces the home screen with a plain one -- the Symphony GUI's menu
-background, the clock and a settings button (see HOME_FILE) -- and cuts the
+background and nothing else (see HOME_FILE) -- and cuts the
 Settings screen to three tiles (see SETTINGS_KEEP): on this rig nobody uses
 Kodi's menus.
 """
@@ -360,12 +360,11 @@ def osd_window_xml():
 # The home screen. Nobody drives Kodi from its own menus on this rig -- the
 # Symphony GUI picks the film and the driver plays it -- so Estuary's home
 # (side menu, add-on/picture/video categories, logo, fanart) is replaced by a
-# plain one: the Symphony GUI's menu-screen background full screen, Estuary's
-# clock where Estuary puts it (top right), and Estuary's settings button (top
-# left), the only control, so it always has focus and OK opens Settings.
-# Written whole rather than patched from stock, so a new Estuary's Home.xml
-# cannot make it fail; the button and clock use Estuary's own IconButton
-# include and font_clock, so they look like stock.
+# plain one: the Symphony GUI's menu-screen background full screen and
+# nothing else -- no clock, no settings button (user, 2026-11-21: the greyscale
+# notes image only). With no control on the window, OK on Home does nothing;
+# Kodi's Settings are not reached from Home. Written whole rather than patched
+# from stock, so a new Estuary's Home.xml cannot make it fail.
 #
 # The background ships inside the skin (HOME_BG_FILE). symphony_home.png,
 # beside this module, is the
@@ -378,7 +377,6 @@ HOME_BG_FILE = "media/symphony_home.png"
 HOME_BG_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "symphony_home.png")
 HOME_IMAGE = "special://skin/" + HOME_BG_FILE
-HOME_SETTINGS_ID = 802          # stock Estuary's id for this button
 
 
 def home_background():
@@ -393,8 +391,7 @@ def home_background():
 def home_window_xml():
     return ("""<?xml version="1.0" encoding="UTF-8"?>
 <window>
-\t<!-- Symphony: the splash, the clock and a settings button -->
-\t<defaultcontrol always="true">%(id)d</defaultcontrol>
+\t<!-- Symphony: the GUI's menu background, nothing else -->
 \t<backgroundcolor>FF000000</backgroundcolor>
 \t<controls>
 \t\t<control type="image">
@@ -405,35 +402,9 @@ def home_window_xml():
 \t\t\t<aspectratio>scale</aspectratio>
 \t\t\t<texture>%(image)s</texture>
 \t\t</control>
-\t\t<control type="group">
-\t\t\t<left>30</left>
-\t\t\t<top>20</top>
-\t\t\t<include content="IconButton">
-\t\t\t\t<param name="control_id" value="%(id)d" />
-\t\t\t\t<param name="onclick" value="ActivateWindow(settings)" />
-\t\t\t\t<param name="icon" value="icons/settings.png" />
-\t\t\t\t<param name="label" value="$LOCALIZE[21417]" />
-\t\t\t</include>
-\t\t</control>
-\t\t<control type="grouplist">
-\t\t\t<top>0</top>
-\t\t\t<right>20</right>
-\t\t\t<width>900</width>
-\t\t\t<height>200</height>
-\t\t\t<align>right</align>
-\t\t\t<orientation>horizontal</orientation>
-\t\t\t<control type="label">
-\t\t\t\t<font>font_clock</font>
-\t\t\t\t<shadowcolor>text_shadow</shadowcolor>
-\t\t\t\t<height>200</height>
-\t\t\t\t<width>auto</width>
-\t\t\t\t<label>$INFO[System.Time]</label>
-\t\t\t</control>
-\t\t</control>
 \t</controls>
 </window>
-""" % {"id": HOME_SETTINGS_ID, "w": SKIN_W, "h": SKIN_H,
-       "image": HOME_IMAGE}).encode()
+""" % {"w": SKIN_W, "h": SKIN_H, "image": HOME_IMAGE}).encode()
 
 
 def patch_settings(data):

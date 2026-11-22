@@ -8,7 +8,7 @@ The rules that matter, and that this file pins down:
     overlay DOWN and the seek bar UP
   - inset 0 is the stock layout
   - a stock skin the patch no longer fits is refused, never half-patched
-  - the home screen is the Symphony background, the clock and Settings
+  - the home screen is the Symphony background and nothing else
   - Settings keeps three tiles, or stays stock if Estuary reshaped it
 
 The runtime half (inset_for, aspect_label, quoting) is tested beside the
@@ -388,32 +388,24 @@ def test_osd_window():
             and down140 == "0,140")
 
 
-def test_home_is_background_clock_and_settings():
-    """Home: the GUI's menu background full screen (shipped in the skin), the
-    clock, and one settings button that always has focus and opens Settings.
-    Nothing else."""
+def test_home_is_the_background_only():
+    """Home: the GUI's menu background full screen (shipped in the skin) and
+    nothing else -- no clock, no settings button, no default control."""
     files = ks.build(_stock())
     root = ET.fromstring(files["xml/Home.xml"])
     ctls = list(root.find("controls"))
-    img = ctls[0]
-    incs = list(root.iter("include"))
-    params = {p.get("name"): p.get("value") for p in incs[0].iter("param")} \
-        if len(incs) == 1 else {}
-    labels = [c.findtext("label") for c in root.iter("control")
-              if c.get("type") == "label"]
-    dc = root.find("defaultcontrol")
-    return (len(ctls) == 3
+    img = ctls[0] if ctls else None
+    return (len(ctls) == 1
+            and len(list(root.iter("control"))) == 1
             and img.get("type") == "image"
             and img.findtext("texture") == "special://skin/media/symphony_home.png"
             and files["media/symphony_home.png"][:8] == b"\x89PNG\r\n\x1a\n"
             and (img.findtext("left"), img.findtext("top"),
                  img.findtext("width"), img.findtext("height"))
             == ("0", "0", "1920", "1080")
-            and incs[0].get("content") == "IconButton"
-            and params.get("onclick") == "ActivateWindow(settings)"
-            and dc is not None and dc.get("always") == "true"
-            and dc.text == params.get("control_id")
-            and labels == ["$INFO[System.Time]"])
+            and root.find("defaultcontrol") is None
+            and b"System.Time" not in files["xml/Home.xml"]
+            and b"settings" not in files["xml/Home.xml"].lower())
 
 
 def test_settings_three_tiles():
@@ -488,7 +480,7 @@ TESTS = [
     ("File-name title shows the database title", test_file_name_title_replaced),
     ("Format line shows the film's aspect", test_format_line_aspect),
     ("Symphony OSD window", test_osd_window),
-    ("Home is the GUI background, clock and settings", test_home_is_background_clock_and_settings),
+    ("Home is the GUI background only", test_home_is_the_background_only),
     ("Settings keeps three tiles in one row", test_settings_three_tiles),
     ("A reshaped Settings window stays stock", test_settings_reshaped_stays_stock),
     ("Live bitrates on the playing format line", test_live_bitrates),

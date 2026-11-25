@@ -28,4 +28,9 @@ makeinstall_target() {
   mkdir -p ${INSTALL}/usr/share/kodi/addons
     cp -a "${stock}" "${skin}"
   python3 ${PKG_DIR}/symphony_skin.py "${stock}" "${skin}"
+
+  # Menu on Home opens Settings (see the file). Named so it loads after
+  # remote.xml: Kodi reads a keymap directory in name order, later wins.
+  mkdir -p ${INSTALL}/usr/share/kodi/system/keymaps
+  cp ${PKG_DIR}/symphony_keymap.xml ${INSTALL}/usr/share/kodi/system/keymaps/symphony.xml
 }

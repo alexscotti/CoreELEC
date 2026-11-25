@@ -218,6 +218,16 @@ def test_patch_refuses_other_shapes():
     return True
 
 
+def test_keymap_menu_on_home_opens_settings():
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = ET.parse(os.path.join(here, "symphony_keymap.xml")).getroot()
+    menus = root.findall("./Home/remote/menu")
+    windows = [w.tag for w in root]
+    return (root.tag == "keymap" and windows == ["Home"] and len(menus) == 1
+            and menus[0].text == "ActivateWindow(Settings)"
+            and "symphony.xml" > "remote.xml")      # loads after stock remote.xml
+
+
 def test_addon_renamed():
     root = ET.fromstring(ks.patch_addon_xml(ADDON))
     return (root.get("id") == "skin.estuary.symphony"
@@ -465,6 +475,7 @@ TESTS = [
     ("Top slides down, seek bar up", test_patch_directions),
     ("Inset 0 is the stock layout", test_patch_has_no_zero_condition),
     ("Unfamiliar window shapes are refused", test_patch_refuses_other_shapes),
+    ("Menu on Home opens Settings (keymap, loads after remote.xml)", test_keymap_menu_on_home_opens_settings),
     ("addon.xml gets the new id and name", test_addon_renamed),
     ("Only stock Estuary is patched", test_addon_must_be_stock_estuary),
     ("Each window slides the right way", test_directions_per_window),

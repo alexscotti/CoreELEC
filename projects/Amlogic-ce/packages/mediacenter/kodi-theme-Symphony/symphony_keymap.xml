@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Symphony: on the Home screen (the notes background, which has no controls)
+     the box's own remote's Menu button opens Kodi's Settings - the three tiles
+     symphony_skin.py keeps. Stock remote.xml sends it to ContextMenu there,
+     which does nothing. Installed as system/keymaps/symphony.xml, read after
+     remote.xml, so this entry wins; every other window keeps stock Menu.
+     The Symphony remote does not come through here: player.coreelec sends Kodi
+     builtins over the EventServer. -->
+<keymap>
+  <Home>
+    <remote>
+      <menu>ActivateWindow(Settings)</menu>
+    </remote>
+  </Home>
+</keymap>

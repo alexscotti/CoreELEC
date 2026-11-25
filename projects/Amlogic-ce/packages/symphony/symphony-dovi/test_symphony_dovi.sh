@@ -98,6 +98,42 @@ run scan
 has "SYMPHONY/dovi.ko" "SYMPHONY/ is searched before the stick root"
 no "dovi_root" "the root copy was not taken"
 
+# --- the module under the name it was downloaded with: no rename needed
+reset; good $R/sticks/plain/5.15_2.6_dovi_patched_fix_fel.ko; devs "/dev/sda1=$R/sticks/plain"
+run scan
+has "5.15_2.6_dovi_patched_fix_fel.ko is dovi_gen" "a module under its download name is found"
+cmp -s $R/sticks/plain/5.15_2.6_dovi_patched_fix_fel.ko $R/storage/.config/dovi.ko \
+  && ok "the renamed-nothing module is captured as dovi.ko" || bad "capture differs: $(cat $R/out)"
+
+# --- a browser's double extension, upper case, a macOS AppleDouble beside it
+reset; good $R/sticks/plain/DOVI.KO.KO
+echo "AppleDouble resource fork" > $R/sticks/plain/._DOVI.KO.KO
+devs "/dev/sda1=$R/sticks/plain"
+run scan
+has "captured" "DOVI.KO.KO is found"
+no "._DOVI" "the ._ AppleDouble file is not even tried"
+
+# --- dovi.ko is tried before any other .ko in the same directory
+reset; good $R/sticks/plain/dovi.ko
+mkmod $R/sticks/plain/a_other.ko dovi_other 'Amlogic Dolby Vision Driver' "$GOOD"
+devs "/dev/sda1=$R/sticks/plain"
+run scan
+has "/dovi.ko is dovi_gen" "dovi.ko wins over another .ko"
+no "dovi_other" "the other .ko was not taken"
+
+# --- other .ko files that are not the module are passed over
+reset; mkmod $R/sticks/plain/a_snd.ko snd_hda_intel 'Intel HDA driver' "$GOOD"
+good $R/sticks/plain/z_fel.ko
+devs "/dev/sda1=$R/sticks/plain"
+run scan
+has "a_snd.ko rejected - not the Dolby Vision driver" "an unrelated .ko is rejected"
+has "z_fel.ko is dovi_gen" "and the module after it is taken"
+
+# --- non-.ko files are ignored
+reset; good $R/sticks/plain/dovi.bin; devs "/dev/sda1=$R/sticks/plain"
+run scan
+has "no dovi.ko found" "a module not ending .ko is not looked at"
+
 # --- already captured: no scan at all
 reset; good $R/storage/.config/dovi.ko; good $R/sticks/plain/dovi.ko
 devs "/dev/sda1=$R/sticks/plain"

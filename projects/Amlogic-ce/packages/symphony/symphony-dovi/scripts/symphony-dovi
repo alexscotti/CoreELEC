@@ -6,13 +6,14 @@ dovi-loader looks for it.
 CoreELEC deliberately ships no dovi.ko: the module is Amlogic's, extracted
 from a box's Android firmware, and every user downloads it themselves. We do
 the same, so the module is in no image and in no git tree. It is provisioned
-ONCE, by hand, onto a USB stick:
+ONCE, by hand, onto a USB stick, under whatever name it was downloaded with:
 
-  <stick>/SYMPHONY/dovi.ko     a stick with a SYMPHONY directory
-  <stick>/dovi.ko              the root of any FAT32 stick
+  <stick>/SYMPHONY/<any>.ko    a stick with a SYMPHONY directory
+  <stick>/<any>.ko             the root of any FAT32 stick
 
-Order of the search is the device order, so one stick carrying both is the
-same stick either way.
+In each directory dovi.ko is tried first, then every other .ko by name. The
+checks below decide which file is the module, not its name, so the user never
+has to rename a download. Devices are searched in device order.
 
 A stick is only ever READ. The module is copied to /storage/.config/dovi.ko
 and that is the end of it: nothing is written back, nothing is tidied up, and
@@ -80,7 +81,25 @@ NOTIFIED = ROOT + '/run/symphony-dovi.notified'
 # an older kernel loads and then does not work.
 MIN_KERNEL = (5, 15, 137)
 
-NAMES = ('/SYMPHONY/dovi.ko', '/dovi.ko')
+DIRS = ('/SYMPHONY', '')
+
+
+def candidates(mnt):
+    """The files to try on a mounted stick, in order: per directory, dovi.ko
+    first, then every other *.ko by name. Names starting with a dot are
+    skipped: macOS leaves "._<name>" AppleDouble files beside everything it
+    copies to a FAT stick."""
+    out = []
+    for d in DIRS:
+        try:
+            names = sorted(os.listdir(mnt + d))
+        except OSError:
+            continue
+        rest = [n for n in names if n.lower().endswith('.ko') and not n.startswith('.')
+                and n.lower() != 'dovi.ko']
+        exact = [n for n in names if n.lower() == 'dovi.ko']
+        out += ['%s/%s' % (d, n) for n in exact + rest]
+    return out
 
 
 def log(msg):
@@ -272,7 +291,7 @@ def look(dev, at=None):
 def look_in(mnt, dev):
     if not mnt:
         return None, None, None
-    for name in NAMES:
+    for name in candidates(mnt):
         path = mnt + name
         if not os.path.isfile(path):
             continue
@@ -339,8 +358,9 @@ def scan():
                 % (', '.join(devs) or 'any vfat partition', WAIT))
             waited = True
         time.sleep(0.5)
-    log('no dovi.ko found: put it in SYMPHONY/ on the Symphony stick, or in the '
-        'root of any FAT32 stick, and reboot. Dolby Vision plays as HDR until then.')
+    log('no dovi.ko found: put the module (any name ending .ko) in the root of '
+        'any FAT32 stick, or in SYMPHONY/ on the Symphony stick, and reboot. Dolby '
+        'Vision plays as HDR until then.')
     return 0
 
 

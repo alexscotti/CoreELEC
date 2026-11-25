@@ -9,7 +9,8 @@ the same, so the module is in no image and in no git tree. It is provisioned
 ONCE, by hand, onto a USB stick, under whatever name it was downloaded with:
 
   <stick>/SYMPHONY/<any>.ko    a stick with a SYMPHONY directory
-  <stick>/<any>.ko             the root of any FAT32 stick
+  <stick>/<any>.ko             the root of any FAT32 or exFAT stick
+                               (macOS formats sticks exFAT by default)
 
 In each directory dovi.ko is tried first, then every other .ko by name. The
 checks below decide which file is the module, not its name, so the user never
@@ -23,7 +24,8 @@ already has a valid one there does not look at the sticks at all.
 
 Runs before opentee_linuxdriver.service, which is what runs dovi-loader. It
 cannot wait for udevil that early (and must not make Kodi's start wait on a
-mount that may never come), so it finds vfat partitions itself with blkid and
+mount that may never come), so it finds FAT32 and exFAT partitions itself
+with blkid and
 mounts each read-only for the look. A boot whose /storage/.config/dovi.ko is
 already a valid module does none of that and returns at once: the scan is the
 cost of provisioning, not of booting.
@@ -229,15 +231,27 @@ def mounted_devices():
     return out
 
 
+FSTYPES = ('vfat', 'exfat')
+FSTYPE = {}     # device -> its filesystem type, from blkid
+
+
 def vfat_devices():
-    """Every vfat partition, in device order. blkid's cache is bypassed: a
-    stick plugged in since the last boot is not in it."""
+    """Every FAT32 or exFAT partition, in device order. blkid's cache is
+    bypassed: a stick plugged in since the last boot is not in it. exFAT
+    because that is what macOS's Disk Utility formats a stick as unless told
+    otherwise."""
     if STUB_DEVS:
         return [d.split('=', 1)[0] for d in STUB_DEVS.split(',') if '=' in d]
-    r = sh(['blkid', '-c', '/dev/null', '-t', 'TYPE=vfat', '-o', 'device'])
-    if r is None or r.returncode != 0:
-        return []
-    return sorted(line.strip() for line in r.stdout.splitlines() if line.strip())
+    devs = []
+    for t in FSTYPES:
+        r = sh(['blkid', '-c', '/dev/null', '-t', 'TYPE=' + t, '-o', 'device'])
+        if r is None or r.returncode != 0:
+            continue
+        for line in r.stdout.splitlines():
+            if line.strip():
+                FSTYPE[line.strip()] = t
+                devs.append(line.strip())
+    return sorted(devs)
 
 
 def stub_dir(dev):
@@ -270,7 +284,7 @@ def look(dev, at=None):
     if at:
         return look_in(at, dev)
     os.makedirs(MNT_DIR, exist_ok=True)
-    r = sh(['mount', '-t', 'vfat', '-o', 'ro,noexec,nodev,nosuid', dev, MNT_DIR])
+    r = sh(['mount', '-t', FSTYPE.get(dev, 'vfat'), '-o', 'ro,noexec,nodev,nosuid', dev, MNT_DIR])
     if r is None or r.returncode != 0:
         # udevil may have mounted it in the moment between reading /proc/mounts
         # and here - seen on the first real boot of this, which logged
@@ -355,11 +369,11 @@ def scan():
             break
         if not waited:
             log('no dovi.ko on %s; waiting up to %gs for a stick'
-                % (', '.join(devs) or 'any vfat partition', WAIT))
+                % (', '.join(devs) or 'any FAT32 or exFAT partition', WAIT))
             waited = True
         time.sleep(0.5)
     log('no dovi.ko found: put the module (any name ending .ko) in the root of '
-        'any FAT32 stick, or in SYMPHONY/ on the Symphony stick, and reboot. Dolby '
+        'any FAT32 or exFAT stick, or in SYMPHONY/ on the Symphony stick, and reboot. Dolby '
         'Vision plays as HDR until then.')
     return 0
 

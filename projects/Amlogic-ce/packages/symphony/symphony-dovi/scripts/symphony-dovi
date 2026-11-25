@@ -463,10 +463,17 @@ def mark_notified():
 
 
 def status():
+    """One key=value line per fact. symphony-webui's /status.json is built from
+    this, so a key added here is a key a controller can read."""
     info, why = check(TARGET)
     print('dovi=%s' % (TARGET if info else ''))
     print('dovi_module=%s' % (describe(info) if info else ''))
     print('dovi_why=%s' % ('' if info else (why if os.path.exists(TARGET) else 'absent')))
+    print('dovi_name=%s' % (info.get('name', '') if info else ''))
+    print('dovi_kernel=%s' % (('.'.join(map(str, kernel_version(info.get('vermagic', '')) or ())))
+                              if info else ''))
+    # The kernel's view: what actually loaded this boot, wherever it came from.
+    print('dovi_loaded=%s' % (loaded() or ''))
     return 0
 
 

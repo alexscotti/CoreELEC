@@ -211,10 +211,15 @@ def main():
     osrel = os.path.join(tmp, 'os-release')
     open(osrel, 'w').write('VERSION="22.0"\nBUILD_ID="%s"\nKODI_COMMIT="%s"\n' % ('b' * 40, 'e' * 40))
     rebooted = os.path.join(tmp, 'rebooted')
+    # symphony-dovi status stand-in: prints whatever dovi.out holds
+    dovi_out = os.path.join(tmp, 'dovi.out')
+    dovi_stub = os.path.join(tmp, 'dovi-status')
+    open(dovi_stub, 'w').write('#!/bin/sh\ncat "%s" 2>/dev/null\n' % dovi_out)
+    os.chmod(dovi_stub, 0o755)
     port = free_port()
     env = dict(os.environ, SYM_FLASH=flash, SYM_DATA=data, SYM_CMDLINE=cmdline,
                SYM_PORT=str(port), SYM_REBOOT='touch ' + rebooted, SYM_NO_MDNS='1',
-               SYM_OS_RELEASE=osrel)
+               SYM_OS_RELEASE=osrel, SYM_DOVI=dovi_stub)
     srv = subprocess.Popen([sys.executable, SERVER], env=env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     base = 'http://127.0.0.1:%d' % port
@@ -258,6 +263,34 @@ def main():
                 break
             except OSError:
                 time.sleep(0.1)
+        # --- /status.json: the Dolby Vision module's state
+        def dv(lines):
+            open(dovi_out, 'w').write(lines)
+            return json.loads(req('/status.json')[1])['dolby_vision']
+        d = dv('dovi=/storage/.config/dovi.ko\ndovi_module=dovi_gen_5_15_2026, kernel 5.15.170\n'
+               'dovi_why=\ndovi_name=dovi_gen_5_15_2026\ndovi_kernel=5.15.170\n'
+               'dovi_loaded=dovi_gen_5_15_2026\n')
+        check(d == {'loaded': True, 'module': 'dovi_gen_5_15_2026', 'kernel': '5.15.170',
+                    'source': 'usb', 'why': ''}, 'status.json: a captured module that loaded')
+        d = dv('dovi=\ndovi_module=\ndovi_why=absent\ndovi_name=\ndovi_kernel=\ndovi_loaded=\n')
+        check(not d['loaded'] and d['why'] == 'absent' and d['source'] == '',
+              'status.json: no module anywhere says absent')
+        d = dv('dovi=\ndovi_module=\ndovi_why=built for kernel 5.15.100, dovi-loader needs at least 5.15.137\n'
+               'dovi_name=\ndovi_kernel=\ndovi_loaded=\n')
+        check(not d['loaded'] and 'needs at least' in d['why'], 'status.json: a rejected module says why')
+        d = dv('dovi=/storage/.config/dovi.ko\ndovi_module=x\ndovi_why=\ndovi_name=dovi_gen\n'
+               'dovi_kernel=5.15.170\ndovi_loaded=\n')
+        check(not d['loaded'] and d['why'] == 'not loaded' and d['module'] == 'dovi_gen',
+              'status.json: a valid module the kernel does not have says not loaded')
+        d = dv('dovi=\ndovi_module=\ndovi_why=absent\ndovi_name=\ndovi_kernel=\ndovi_loaded=dovi\n')
+        check(d['loaded'] and d['source'] == 'system' and d['module'] == 'dovi',
+              'status.json: a module loaded from elsewhere is source system')
+        os.unlink(dovi_out)
+        d = dv('')
+        check(not d['loaded'] and d['why'] == 'unknown', 'status.json: no answer from symphony-dovi is unknown')
+        j = json.loads(req('/status.json')[1])
+        check(j.get('running') == 'A' and 'slots' in j, 'status.json still carries the slots')
+
         st, page = req('/host_management')
         page = page.decode()
         check(st == 200 and 'Running slot:</strong> A' in page, 'page shows running slot A')

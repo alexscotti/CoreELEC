@@ -51,6 +51,7 @@ CMDLINE = os.environ.get('SYM_CMDLINE', '/proc/cmdline')
 PORT = int(os.environ.get('SYM_PORT', '80'))
 REBOOT_CMD = os.environ.get('SYM_REBOOT', 'systemctl reboot').split()
 OS_RELEASE = os.environ.get('SYM_OS_RELEASE', '/etc/os-release')
+DOVI_CMD = os.environ.get('SYM_DOVI', '/usr/lib/coreelec/symphony-dovi status').split()
 
 # Where the two forks a slot is built from live: BUILD_ID is a commit of the
 # CoreELEC fork, KODI_COMMIT one of the xbmc fork (os-release and MANIFEST).
@@ -138,6 +139,32 @@ def slot_info(slot):
             'build_id': m.get('BUILD_ID', ''),
             'kodi': m.get('KODI_COMMIT', ''),
             'coreelec': m.get('COREELEC_VERSION', '')}
+
+
+def dolby_vision():
+    """The Dolby Vision module's state, from `symphony-dovi status` (the same
+    checks its boot step makes). loaded: the kernel has it this boot.
+    source: "usb" when it is the module the box captured from a stick, "system"
+    when one is loaded from elsewhere, "" when none is. why: what is missing
+    when nothing is loaded ("absent", a rejection reason, or "not loaded" when
+    a valid module is in place but the kernel does not have it)."""
+    try:
+        r = subprocess.run(DOVI_CMD, capture_output=True, text=True, timeout=10)
+        kv = dict(line.split('=', 1) for line in r.stdout.splitlines() if '=' in line)
+    except (OSError, subprocess.SubprocessError):
+        kv = {}
+    if not kv:
+        return {'loaded': False, 'module': '', 'kernel': '', 'source': '', 'why': 'unknown'}
+    loaded = bool(kv.get('dovi_loaded'))
+    captured = bool(kv.get('dovi'))
+    why = ''
+    if not loaded:
+        why = kv.get('dovi_why') or 'not loaded'
+    return {'loaded': loaded,
+            'module': kv.get('dovi_loaded') or kv.get('dovi_name', ''),
+            'kernel': kv.get('dovi_kernel', ''),
+            'source': ('usb' if captured else 'system') if loaded else '',
+            'why': why}
 
 
 def os_release():
@@ -960,7 +987,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, '\n'.join(log_lines()), 'text/plain; charset=utf-8')
         if u.path == '/status.json':
             return self.json(200, {'running': running_slot(), 'selected': selected_slot(),
-                                   'slots': {s: slot_info(s) for s in 'AB'}})
+                                   'slots': {s: slot_info(s) for s in 'AB'},
+                                   'dolby_vision': dolby_vision()})
         self.send(404, 'not found', 'text/plain')
 
     def do_POST(self):

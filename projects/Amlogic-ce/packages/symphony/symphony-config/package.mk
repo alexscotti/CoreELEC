@@ -35,7 +35,8 @@ PKG_TOOLCHAIN="manual"
 # a different display needs them re-read. Also shutdownstate, addons
 # update mode, the DV LED and the playlists path.
 #
-# Also: the timezone (and tz-data ordered after usercache), the persistent
+# Also: the timezone (and tz-data ordered after usercache), Kodi restarted
+# 100ms after it quits (kodi-restart-fast.conf: the Symphony GUI's black gap), the persistent
 # journal, SSH via sshd.conf, Samba ON via samba.conf (opt-in in every other
 # build; we move files to the box with it in development - samba.disabled,
 # the settings add-on's "off", still wins), WoL autostart.sh, cec_HDMI.xml (the box ignores
@@ -52,7 +53,8 @@ makeinstall_target() {
   mkdir -p ${INSTALL}/usr/config ${INSTALL}/usr/cache \
            ${INSTALL}/usr/share/symphony/userdata \
            ${INSTALL}/usr/share/symphony/guisettings.d \
-           ${INSTALL}/usr/lib/systemd/system/tz-data.service.d
+           ${INSTALL}/usr/lib/systemd/system/tz-data.service.d \
+           ${INSTALL}/usr/lib/systemd/system/kodi.service.d
 
   cp -a ${PKG_DIR}/config/usr-config/.    ${INSTALL}/usr/config/
   cp -a ${PKG_DIR}/config/usr-cache/.     ${INSTALL}/usr/cache/
@@ -62,4 +64,6 @@ makeinstall_target() {
 
   cp ${PKG_DIR}/units/tz-data-after-usercache.conf \
     ${INSTALL}/usr/lib/systemd/system/tz-data.service.d/
+  cp ${PKG_DIR}/units/kodi-restart-fast.conf \
+    ${INSTALL}/usr/lib/systemd/system/kodi.service.d/
 }
